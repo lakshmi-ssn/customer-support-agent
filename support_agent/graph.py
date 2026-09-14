@@ -33,7 +33,7 @@ are already written in `policy.py`. You are building the thing that uses them.
 
 import re
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 
 from . import config, llm, policy, retrieval
@@ -168,37 +168,64 @@ class SupportGraph:
 
     # ------------------------------------------------------- TODO 3 and 4 --- #
     def node_act(self, state):
-        """TODO 4 — let the model decide which tools to call. Lecture 7.
+        """Let the model decide which tools to call, then feed the results back.
 
-        This is the single most important task. Until it exists your program can
-        look things up only by accident and can never do anything.
-
-        The idea, from sections 2 to 4 of the Lecture 7 notebook:
-
-            model = llm.chat_model().bind_tools(list(self.tools.values()))
-            reply = model.invoke(messages)     # reply.tool_calls says what it wants
-
-        Then run each tool it asked for, put each result back into the message
-        list as a ToolMessage, and go round again. You keep looping while the
-        model is still asking for tools, and stop when it answers in plain text
-        instead. TODO 6 wires up the edge that does the looping.
-
-        Three things the shipped `lookup` step cannot do, and yours must:
-
-          * make a second call that depends on the first — call `get_order`, see
-            that the order exists, and only then call `check_return_eligibility`;
-          * call `get_ticket_history` before troubleshooting, so it can notice the
-            customer has already asked three times;
-          * stop. Use `config.MAX_TOOL_STEPS` as a limit, and decide what the agent
-            says when it hits it. Without a limit a confused model will loop until
-            your credit runs out.
-
-        Things will go wrong and must not crash the run: the model will invent a
-        tool that does not exist, pass the wrong arguments, or call a tool that
-        raises an error. Catch all three and put the problem back into the
-        conversation so the model can try something else.
+        The model is given the current message history plus the customer's query and
+        can ask for a tool call. We run the call, append a ToolMessage with the
+        result, and keep looping until the model answers in plain text or the step
+        cap is reached.
         """
-        raise NotImplementedError("TODO 4 — see the docstring")
+        model = llm.chat_model().bind_tools(list(self.tools.values()))
+        messages = list(state.get("messages", []))
+
+        if not messages:
+            messages.append(HumanMessage(content=as_text(state.get("query", ""))))
+
+        if not any(isinstance(m, HumanMessage) for m in messages):
+            messages.append(HumanMessage(content=as_text(state.get("query", ""))))
+
+        for step in range(config.MAX_TOOL_STEPS):
+            reply = model.invoke(messages)
+            tool_calls = getattr(reply, "tool_calls", None) or []
+            messages.append(reply)
+
+            if not tool_calls:
+                return {"steps": ["act"], "messages": messages}
+
+            for call in tool_calls:
+                call_id = call.get("id") or f"call_{step}_{len(messages)}"
+                name = call.get("name") or (call.get("function") or {}).get("name")
+                raw_args = call.get("args")
+                if raw_args is None:
+                    raw_args = (call.get("function") or {}).get("arguments") or {}
+                if isinstance(raw_args, str):
+                    try:
+                        import json
+                        raw_args = json.loads(raw_args)
+                    except Exception:  # noqa: BLE001
+                        raw_args = {}
+                if not isinstance(raw_args, dict):
+                    raw_args = {}
+
+                if not name or name not in self.tools:
+                    result = f"Tool '{name}' does not exist or is unavailable."
+                else:
+                    try:
+                        result = self.tools[name].invoke(raw_args)
+                    except Exception as exc:  # noqa: BLE001
+                        result = f"Tool error for {name}: {exc}"
+
+                messages.append(ToolMessage(
+                    content=str(result),
+                    tool_call_id=call_id,
+                    name=name,
+                ))
+
+        messages.append(AIMessage(content=(
+            "I reached the tool-call limit while trying to complete this request. "
+            "I need to stop and escalate or ask for clarification."
+        )))
+        return {"steps": ["act"], "messages": messages}
 
     def node_verify(self, state):
         """TODO 3 — check the answer is actually supported before sending it. Lecture 6.

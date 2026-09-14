@@ -19,7 +19,7 @@ def _chroma_client():
     return chromadb.PersistentClient(path=str(config.INDEX_DIR / "chroma"))
 
 
-def build(force=False, strategy="fixed", verbose=True):
+def build(force=False, strategy="structured", verbose=True):
     """(Re)build the vector index and the chunk manifest. Returns the chunks."""
     chunks_path = config.INDEX_DIR / "chunks.json"
     if force and config.INDEX_DIR.exists():

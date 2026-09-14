@@ -17,7 +17,7 @@ from support_agent import config, index  # noqa: E402
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--force", action="store_true")
-    ap.add_argument("--strategy", default="fixed", choices=["fixed", "structured"])
+    ap.add_argument("--strategy", default="structured", choices=["fixed", "structured"])
     ap.add_argument("--chunk-size", type=int)
     ap.add_argument("--chunk-overlap", type=int)
     a = ap.parse_args()

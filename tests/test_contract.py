@@ -112,6 +112,40 @@ def test_graph_survives_history_with_list_content():
     assert out["steps"] == ["lookup"]
 
 
+def test_node_act_runs_tool_calls_until_the_model_is_done(monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from support_agent.graph import SupportGraph
+
+    g = SupportGraph(customer_id="C-1001")
+
+    class FakeModel:
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, tools):
+            return self
+
+        def invoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(content="", tool_calls=[{
+                    "id": "call_1",
+                    "name": "get_order",
+                    "args": {"order_id": "MRD-700100"},
+                }])
+            return AIMessage(content="thanks")
+
+    monkeypatch.setattr("support_agent.graph.llm.chat_model", lambda: FakeModel())
+    state = {"query": "check my order", "customer_id": "C-1001",
+             "history": [], "messages": [HumanMessage(content="check my order")],
+             "hits": [], "steps": []}
+
+    out = g.node_act(state)
+    assert out["steps"] == ["act"]
+    assert any(isinstance(m, ToolMessage) for m in out["messages"])
+    assert any(getattr(m, "content", "") == "thanks" for m in out["messages"])
+
+
 # --------------------------------------------------------------------------- #
 # the submission contract
 # --------------------------------------------------------------------------- #

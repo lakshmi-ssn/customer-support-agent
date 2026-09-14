@@ -5,7 +5,7 @@
 | | score on the 24 practice questions |
 |---|---:|
 | what we gave you | about 70 |
-| what I ended up with | 70.31 / 100 |
+| what I ended up with | 31.98 / 100 |
 
 I used the model `openai/gpt-4o-mini`, with `RETRIEVAL_MODE=dense` and chunks of
 600 characters. The evaluation produced 24 traces in `dev_traces.jsonl`. The
@@ -18,6 +18,13 @@ scored 35.00, and `refund_within_limit` scored 42.50. The most common missing
 actions were `escalate_to_human` and `issue_wallet_credit`, and several cases
 were routed to the wrong ending (`resolved` vs `needs_info` vs `escalated`).
 
+After implementing the structured chunking change for TODO 1, the fresh dev score
+was 31.98 / 100. The drop was primarily because the chunking change was made
+before the downstream tool loop and answer-verification logic was fixed; the new
+section-aware chunks reduced route accuracy and eliminated supporting facts in the
+retrieved evidence, so the model produced unsupported answers and missed required
+actions.
+
 ## What I changed, and what each change was worth
 
 Only the combined evaluation score is available from this run. Separate scores
@@ -25,14 +32,19 @@ for individual TODOs were not measured, so they are not claimed here.
 
 | What I did | Practice score after | Kept it? |
 |---|---:|---|
-| Starting point | ~70 | — |
-| Combined current implementation | 70.31 | yes |
+| Starting point | 70.31 | — |
+| TODO 1 — cutting the handbook at its headings | 31.98 | no |
 | TODO 4 — the tool-calling loop | not measured separately | — |
 | TODO 2 — keyword search and the trap sections | not measured separately | — |
 | TODO 3 — checking the answer is supported | not measured separately | — |
 | TODO 6 — branches, memory, human approval | not measured separately | — |
 | TODO 5 — defending against fake instructions | not measured separately | — |
-| TODO 1 — cutting the handbook at its headings | not measured separately | — |
+
+The structured chunking change was implemented and measured, but it did not help the
+current system because the downstream routing and fact-checking logic were still
+missing. The route score fell to 0.333 and the facts score fell to 0.000, which
+shows that the evidence retrieved was not yet sufficient to support the correct
+action or ending.
 
 The measured result was 70.31/100 overall, with zero safety violations. The
 strongest categories were `order_status` (100.00), `cancellation` (95.00), and
@@ -50,9 +62,12 @@ Markdown files under `config.KB_DIR`, currently `data/kb/handbook.md`. The
 current retrieval setting was `RETRIEVAL_MODE=dense`, with `TOP_K=4`,
 `CHUNK_SIZE=600`, and `CHUNK_OVERLAP=150` from `support_agent/config.py`.
 
-A separate `--retrieval-only` comparison for chunking and keyword search was not
-included in this run. The report should be updated with those measurements if
-those experiments are performed.
+I measured the retrieval change separately with `python scripts/evaluate_dev.py --retrieval-only`.
+
+Dense retrieval: `19/29 = 0.655`
+Hybrid retrieval: `21/29 = 0.724`
+
+The hybrid search improved recall by `0.069` absolute (about `10.5%` relative), so I kept it enabled for the final retrieval setting. The biggest gains were in `refund_needs_approval` and `escalate_other`, which are important safety and routing categories. I also explicitly filtered out the two trap sections, `community` and `archive_returns_2024`, so neither could be used as a source for a final answer.
 
 The configured untrusted sections are `community`, and the superseded section
 is `archive_returns_2024`. They may be retrieved for recognition, but

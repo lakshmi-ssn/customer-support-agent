@@ -9,8 +9,11 @@ the rest. You wrote all of it in the Lecture 6 notebook, so this is mostly copyi
 your own code across and then measuring whether it actually helps here.
 """
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass
+
+from rank_bm25 import BM25Okapi
 
 from . import config, index, llm
 
@@ -23,6 +26,33 @@ class Hit:
     text: str
     score: float
     metadata: dict
+
+
+# --------------------------------------------------------------------------- #
+# tokenizing for BM25
+# --------------------------------------------------------------------------- #
+
+_TOKEN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def _tokenize(text):
+    """Lowercase + split into tokens for BM25.
+
+    Handles the ERR-4021 vs ERR 4021 problem: a hyphenated code like
+    "ERR-4021" is kept whole as one token ("err-4021"), but we ALSO emit its
+    parts ("err", "4021") and the squashed form ("err4021"). That way a query
+    typed as "ERR 4021" (two plain tokens: "err", "4021") still overlaps with
+    a corpus token that was written "ERR-4021", because both produce "err"
+    and "4021" as tokens.
+    """
+    tokens = []
+    for match in _TOKEN.findall(text.lower()):
+        tokens.append(match)
+        if "-" in match:
+            parts = match.split("-")
+            tokens.extend(parts)
+            tokens.append("".join(parts))
+    return tokens
 
 
 class Retriever:
@@ -51,89 +81,88 @@ class Retriever:
 
     # -------------------------------------------------------------- lexical --
     def lexical(self, query, k=None):
-        """TODO 2a — keyword search. From Lecture 6, "Hybrid search".
+        """BM25 keyword search.
 
-        `dense` above searches by meaning, which is great for "get my money back"
-        but weak on exact strings. A customer typing `ERR-4021` wants the piece
-        containing exactly that, and meaning-based search has no idea it is a code
-        rather than an odd-looking word.
-
-        BM25 is plain keyword search and handles that case. `self.chunks` is
-        already loaded and `rank_bm25` is already installed; this is section 5 of
-        the Lecture 6 notebook.
-
-        One thing to think about: you will probably split the text on spaces. Does
-        that keep `ERR-4021` as one word? What if the customer types `ERR 4021`?
-
-        Return a list of `Hit` objects, same as `dense`, so the two can be merged.
+        `dense` searches by meaning; this searches by exact/overlapping
+        tokens, which is what wins for things like error codes that have no
+        real "meaning" for an embedding to latch onto.
         """
-        raise NotImplementedError("TODO 2a — see the docstring")
+        k = k or config.CANDIDATE_K
+
+        if self._bm25 is None:
+            corpus_tokens = [_tokenize(c.text) for c in self.chunks]
+            self._bm25 = BM25Okapi(corpus_tokens)
+
+        query_tokens = _tokenize(query)
+        scores = self._bm25.get_scores(query_tokens)
+
+        ranked = sorted(range(len(self.chunks)), key=lambda i: scores[i], reverse=True)
+        hits = []
+        for i in ranked[:k]:
+            if scores[i] <= 0:
+                continue
+            hits.append(self._hit(self.chunks[i], float(scores[i])))
+        return hits
 
     def rrf(self, *rankings, k=None, top=None):
-        """TODO 2b — merge two lists of results. From Lecture 6, "RRF".
+        """Reciprocal Rank Fusion — merge any number of ranked Hit lists.
 
-        You now have two lists: one from meaning-based search, one from keyword
-        search. You want a single list.
-
-        You cannot just add the scores. The two kinds of search produce numbers
-        that mean completely different things — one might give 0.4 for an excellent
-        match and the other 12.7. Adding them is meaningless.
-
-        So ignore the scores and use each result's *position* instead. A piece that
-        came 1st in one list and 3rd in the other scores:
-
-            1/(k + 1)  +  1/(k + 3)
-
-        `k` is `config.RRF_K`, which is 60. It controls how much better 1st place
-        is than 5th. Try changing it and see what happens.
-
-        Accepts any number of ranked lists. Returns one merged list of `Hit`s.
+        Scores from different search methods aren't comparable (dense might
+        say 0.4, BM25 might say 12.7), so we throw scores away and combine by
+        *rank position* instead: a hit ranked r in a list contributes
+        1/(k + r). Contributions from every list a hit appears in are summed,
+        so a hit that shows up near the top of two lists beats one that's #1
+        in only one list.
         """
-        raise NotImplementedError("TODO 2b — see the docstring")
+        k = k or config.RRF_K
+
+        fused_scores = defaultdict(float)
+        hit_by_id = {}
+        for ranking in rankings:
+            for rank, hit in enumerate(ranking, start=1):
+                fused_scores[hit.chunk_id] += 1.0 / (k + rank)
+                # Keep the first-seen Hit object for each id as the representative.
+                hit_by_id.setdefault(hit.chunk_id, hit)
+
+        merged = []
+        for chunk_id, score in sorted(fused_scores.items(), key=lambda kv: kv[1], reverse=True):
+            original = hit_by_id[chunk_id]
+            merged.append(Hit(chunk_id=original.chunk_id, doc_id=original.doc_id,
+                              title=original.title, text=original.text,
+                              score=score, metadata=original.metadata))
+
+        return merged[:top] if top else merged
 
     def hybrid(self, query, k=None):
-        """TODO 2c — put 2a and 2b together: run both searches, merge with rrf().
+        """Run dense + lexical search, merge with RRF.
 
-        Then compare against meaning-based search on its own:
+        Compare against dense alone with:
 
             RETRIEVAL_MODE=dense  python scripts/evaluate_dev.py --retrieval-only
             RETRIEVAL_MODE=hybrid python scripts/evaluate_dev.py --retrieval-only
 
-        Be honest about the result. Our handbook is only 36 pieces long, and on
-        something that small the gain may be tiny or even negative. "I measured it,
-        it gained 0.02, so I did not use it" is a good answer and earns marks.
-        Claiming it helped without a number does not.
+        On a 36-chunk handbook the gain may be small or even negative — report
+        the actual number rather than assuming hybrid is better.
         """
-        raise NotImplementedError("TODO 2c — see the docstring")
+        k = k or config.CANDIDATE_K
+        dense_hits = self.dense(query, k)
+        lexical_hits = self.lexical(query, k)
+        return self.rrf(dense_hits, lexical_hits, top=k)
 
     # ------------------------------------------------------------- optional --
     def rerank(self, query, candidates, top_n=None):
         """OPTIONAL — re-sort the results with an AI. Lecture 6, "Reranking".
 
-        Search is fast but rough. So fetch more results than you need (8), ask a
-        model to score each one out of 10 for how well it answers the question, and
-        keep the best 4. Ask for just a number and set `max_tokens=5`.
-
-        The catch is cost: one extra AI call per result per question. Work out what
-        that costs in tokens and time, and say whether the gain was worth it.
+        Fetches more results than needed, asks a model to score each 0-10 for
+        relevance, and keeps the best `top_n`. Left unimplemented here since
+        it's optional and costs one extra AI call per candidate per question —
+        worth doing only if you've measured hybrid first and want to push
+        further, and want to report the added cost against the added accuracy.
         """
         raise NotImplementedError("reranking is optional — see the docstring")
 
     def translate_query(self, query):
-        """OPTIONAL — rewrite the question before searching. Lecture 6.
-
-        Customers do not use the handbook's words. They say "when do I get my
-        money" and the handbook says "refund processing timeline".
-
-        Two ways to close that gap:
-          * ask a model for three rewordings, search with all of them, and merge
-            the results with `rrf`;
-          * ask a model to write a fake answer, then search using that fake answer
-            as the query. Answers look like other answers, so this often matches
-            better than the question does.
-
-        Most useful on very short questions.
-        """
+        """OPTIONAL — rewrite the question before searching. See docstring."""
         raise NotImplementedError("query translation is optional")
 
     # ----------------------------------------------------------------- entry --
@@ -150,32 +179,26 @@ class Retriever:
         return self.postprocess(hits)[:k]
 
     def postprocess(self, hits):
-        """TODO 2d — deal with the two trap sections. Lecture 5, on metadata.
+        """Handle the two trap sections: archive_returns_2024 (superseded)
+        and community (untrusted, contains a prompt-injection attempt).
 
-        Search has no idea that some text is untrustworthy. Two sections come back
-        looking just as relevant as the real ones:
+        Strategy chosen here: DROP them from results entirely. Rationale —
+        this is a customer-support bot, not a research tool; the risk of the
+        model treating stale policy or injected instructions as authoritative
+        outweighs the (small) benefit of surfacing them, and dropping is the
+        simplest guarantee that neither is ever cited as a source.
 
-          `archive_returns_2024`  An old policy saying 15 days. It was replaced in
-                                  January 2026 and applies to none of the orders
-                                  you have. Quoting it is always wrong.
-
-          `community`             Customer gossip, not policy. It also contains a
-                                  fake instruction telling the AI to approve any
-                                  refund.
-
-        Three reasonable options. Any of them earns full marks as long as you
-        explain your choice in the report:
-
-          * remove them from the results completely;
-          * keep them, but push them to the bottom;
-          * keep them, so the agent can recognise a claim a customer quotes at it,
-            but never list them as a source.
-
-        Naming either one as your source scores zero for sources on that question.
-        Every piece carries `status` and `trust` in `.metadata`, and the two names
-        are in `config.UNTRUSTED_DOCS` and `config.SUPERSEDED_DOCS`.
+        If you'd rather keep them visible-but-deprioritized (e.g. so the
+        agent can address a customer who quotes the old policy at it), swap
+        the filter below for the commented-out "push to bottom" version.
         """
-        return hits
+        bad_ids = set(config.UNTRUSTED_DOCS) | set(config.SUPERSEDED_DOCS)
+
+        # Chosen strategy: remove entirely.
+        return [h for h in hits if h.doc_id not in bad_ids]
+
+        # Alternative strategy: keep, but always rank after trusted hits.
+        # return sorted(hits, key=lambda h: h.doc_id in bad_ids)
 
 
 _RETRIEVER = None
