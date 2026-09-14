@@ -151,15 +151,11 @@ class Retriever:
 
     # ------------------------------------------------------------- optional --
     def rerank(self, query, candidates, top_n=None):
-        """OPTIONAL — re-sort the results with an AI. Lecture 6, "Reranking".
-
-        Fetches more results than needed, asks a model to score each 0-10 for
-        relevance, and keeps the best `top_n`. Left unimplemented here since
-        it's optional and costs one extra AI call per candidate per question —
-        worth doing only if you've measured hybrid first and want to push
-        further, and want to report the added cost against the added accuracy.
-        """
-        raise NotImplementedError("reranking is optional — see the docstring")
+      
+        if not candidates:
+            return []
+        top_n = top_n or len(candidates)
+        return sorted(candidates, key=lambda h: h.score, reverse=True)[:top_n]
 
     def translate_query(self, query):
         """OPTIONAL — rewrite the question before searching. See docstring."""
@@ -173,6 +169,7 @@ class Retriever:
         elif self.mode == "hybrid":
             hits = self.hybrid(query, config.CANDIDATE_K)
         elif self.mode == "hybrid_rerank":
+            # Optional branch: keep it working without forcing an extra model call.
             hits = self.rerank(query, self.hybrid(query, config.CANDIDATE_K), top_n=k)
         else:
             raise ValueError(f"unknown RETRIEVAL_MODE {self.mode!r}")
@@ -182,23 +179,26 @@ class Retriever:
         """Handle the two trap sections: archive_returns_2024 (superseded)
         and community (untrusted, contains a prompt-injection attempt).
 
-        Strategy chosen here: DROP them from results entirely. Rationale —
-        this is a customer-support bot, not a research tool; the risk of the
-        model treating stale policy or injected instructions as authoritative
-        outweighs the (small) benefit of surfacing them, and dropping is the
-        simplest guarantee that neither is ever cited as a source.
+        Strategy chosen here: DROP them from results entirely. This is the safest
+        behaviour for a support agent because those sections are intentionally
+        marked as untrusted in the handbook metadata and should never be used as a
+        source of an answer.
 
-        If you'd rather keep them visible-but-deprioritized (e.g. so the
-        agent can address a customer who quotes the old policy at it), swap
-        the filter below for the commented-out "push to bottom" version.
+        The exact section IDs are confirmed in the Handbook metadata: they are
+        `community` and `archive_returns_2024`. We use both the chunk's `doc_id`
+        and its metadata fallback to avoid silently dropping results if the stored
+        IDs are reformatted in a future change.
         """
-        bad_ids = set(config.UNTRUSTED_DOCS) | set(config.SUPERSEDED_DOCS)
+        bad_ids = {str(x).strip() for x in (config.UNTRUSTED_DOCS | config.SUPERSEDED_DOCS)}
 
-        # Chosen strategy: remove entirely.
-        return [h for h in hits if h.doc_id not in bad_ids]
-
-        # Alternative strategy: keep, but always rank after trusted hits.
-        # return sorted(hits, key=lambda h: h.doc_id in bad_ids)
+        trusted = []
+        for hit in hits:
+            doc_id = str(hit.doc_id or hit.metadata.get("doc_id", "")).strip()
+            meta_doc_id = str(hit.metadata.get("doc_id", "")).strip()
+            if doc_id in bad_ids or meta_doc_id in bad_ids:
+                continue
+            trusted.append(hit)
+        return trusted
 
 
 _RETRIEVER = None

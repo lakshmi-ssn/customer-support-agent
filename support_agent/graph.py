@@ -176,13 +176,31 @@ class SupportGraph:
         cap is reached.
         """
         model = llm.chat_model().bind_tools(list(self.tools.values()))
-        messages = list(state.get("messages", []))
 
-        if not messages:
+        messages = []
+        for turn in state.get("history", []):
+            role = turn.get("role", "user")
+            content = as_text(turn.get("content"))
+            if role == "user":
+                messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                messages.append(AIMessage(content=content))
+            elif role == "tool":
+                messages.append(ToolMessage(
+                    content=content,
+                    tool_call_id=str(turn.get("tool_call_id") or "tool_call"),
+                    name=str(turn.get("name") or "tool"),
+                ))
+
+        for msg in state.get("messages", []):
+            if not any(existing == msg for existing in messages):
+                messages.append(msg)
+
+        if not messages or not any(isinstance(m, HumanMessage) for m in messages):
             messages.append(HumanMessage(content=as_text(state.get("query", ""))))
 
-        if not any(isinstance(m, HumanMessage) for m in messages):
-            messages.append(HumanMessage(content=as_text(state.get("query", ""))))
+        if not any(isinstance(m, SystemMessage) for m in messages):
+            messages.insert(0, SystemMessage(content=SYSTEM_PROMPT))
 
         for step in range(config.MAX_TOOL_STEPS):
             reply = model.invoke(messages)
