@@ -34,3 +34,4 @@ class SupportState(TypedDict, total=False):
     citations: list
     actions: list
     escalation: dict | None
+    verification: dict | None

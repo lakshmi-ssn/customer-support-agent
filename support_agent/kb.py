@@ -23,9 +23,7 @@ from . import config
 
 HEADING = re.compile(r"^##\s+(?P<title>.+?)\s*$", re.MULTILINE)
 META = re.compile(r"<!--(?P<body>[^>]*?)-->")
-SUBHEAD = re.compile(r'\n(?=###\s)')
-BLANK_LINE = re.compile(r'\n\s*\n')
-SENTENCE_END = re.compile(r'(?<=[.!?])\s+')
+
 
 @dataclass
 class Section:
@@ -115,57 +113,7 @@ def split_fixed(sections, size, overlap):
     return out
 
 
-
-
-def _pieces(text, size):
-    """Cut `text` into pieces no longer than `size`, trying nicer boundaries
-    before falling back to a hard cut. Each boundary is tried in turn; only
-    the parts that are still too long get split again by the next boundary
-    in line — a paragraph that already fits doesn't get chopped into
-    sentences just because its neighbor didn't fit.
-    """
-    if len(text) <= size:
-        return [text]
-
-    for boundary in (SUBHEAD, BLANK_LINE, SENTENCE_END):
-        parts = [p for p in boundary.split(text) if p.strip()]
-        if len(parts) > 1:
-            out = []
-            for part in parts:
-                out.extend(_pieces(part, size))
-            return out
-
-    # nothing left to split on: hard cut, same as split_fixed's fallback
-    return [text[i:i + size] for i in range(0, len(text), size)]
-
-
-def _with_overlap(pieces, overlap):
-    """Stitch the tail of the previous piece onto the front of the next one,
-    so a cut doesn't throw away the context right around it."""
-    if overlap <= 0 or len(pieces) <= 1:
-        return pieces
-    stitched = [pieces[0]]
-    for prev, cur in zip(pieces, pieces[1:]):
-        stitched.append(prev[-overlap:] + cur)
-    return stitched
-
-
-def split_structured(sections, size, overlap, add_title=False):
-    if size <= overlap:
-        raise ValueError("CHUNK_SIZE must exceed CHUNK_OVERLAP")
-
-    out = []
-    for section in sections:
-        pieces = _with_overlap(_pieces(section.text, size), overlap)
-        for piece in pieces:
-            if add_title:
-                # A lone table row doesn't say which policy it belongs to —
-                # the title does.
-                piece = f"{section.title}\n{piece}"
-            out.append((section, piece))
-    return out
-
-def split_structured1(sections, size, overlap):
+def split_structured(sections, size, overlap):
     """TODO 1 — cut at the headings instead. From Lecture 5, "Splitting Documents".
 
     The goal: every piece belongs to exactly one section, so nothing is mislabelled.
@@ -217,3 +165,4 @@ def chunk_documents(sections, size=None, overlap=None, strategy="fixed"):
                       "trust": section.metadata.get("trust", "official"),
                       "chunk_index": i}))
     return chunks
+

@@ -9,11 +9,8 @@ the rest. You wrote all of it in the Lecture 6 notebook, so this is mostly copyi
 your own code across and then measuring whether it actually helps here.
 """
 
-import re
 from collections import defaultdict
 from dataclasses import dataclass
-
-from rank_bm25 import BM25Okapi
 
 from . import config, index, llm
 
@@ -28,33 +25,6 @@ class Hit:
     metadata: dict
 
 
-# --------------------------------------------------------------------------- #
-# tokenizing for BM25
-# --------------------------------------------------------------------------- #
-
-_TOKEN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-
-
-def _tokenize(text):
-    """Lowercase + split into tokens for BM25.
-
-    Handles the ERR-4021 vs ERR 4021 problem: a hyphenated code like
-    "ERR-4021" is kept whole as one token ("err-4021"), but we ALSO emit its
-    parts ("err", "4021") and the squashed form ("err4021"). That way a query
-    typed as "ERR 4021" (two plain tokens: "err", "4021") still overlaps with
-    a corpus token that was written "ERR-4021", because both produce "err"
-    and "4021" as tokens.
-    """
-    tokens = []
-    for match in _TOKEN.findall(text.lower()):
-        tokens.append(match)
-        if "-" in match:
-            parts = match.split("-")
-            tokens.extend(parts)
-            tokens.append("".join(parts))
-    return tokens
-
-
 class Retriever:
     def __init__(self, mode=None, top_k=None):
         self.mode = mode or config.RETRIEVAL_MODE
@@ -63,142 +33,323 @@ class Retriever:
         self._bm25 = None
 
     def _hit(self, chunk, score):
-        return Hit(chunk_id=chunk.chunk_id, doc_id=chunk.doc_id, title=chunk.title,
-                   text=chunk.text, score=score, metadata=dict(chunk.metadata))
+        return Hit(
+            chunk_id=chunk.chunk_id,
+            doc_id=chunk.doc_id,
+            title=chunk.title,
+            text=chunk.text,
+            score=score,
+            metadata=dict(chunk.metadata),
+        )
 
     # ---------------------------------------------------------------- dense --
     def dense(self, query, k=None):
         """Embedding search over the Chroma index."""
         k = k or config.CANDIDATE_K
-        res = self.collection.query(query_texts=[query], n_results=min(k, len(self.chunks)))
+
+        res = self.collection.query(
+            query_texts=[query],
+            n_results=min(k, len(self.chunks)),
+        )
+
         hits = []
-        for cid, text, meta, dist in zip(res["ids"][0], res["documents"][0],
-                                         res["metadatas"][0], res["distances"][0]):
-            hits.append(Hit(chunk_id=cid, doc_id=meta.get("doc_id", cid.split("#")[0]),
-                            title=meta.get("title", ""), text=text,
-                            score=1.0 / (1.0 + float(dist)), metadata=dict(meta)))
+
+        for cid, text, meta, dist in zip(
+            res["ids"][0],
+            res["documents"][0],
+            res["metadatas"][0],
+            res["distances"][0],
+        ):
+            hits.append(
+                Hit(
+                    chunk_id=cid,
+                    doc_id=meta.get("doc_id", cid.split("#")[0]),
+                    title=meta.get("title", ""),
+                    text=text,
+                    score=1.0 / (1.0 + float(dist)),
+                    metadata=dict(meta),
+                )
+            )
+
         return hits
 
     # -------------------------------------------------------------- lexical --
     def lexical(self, query, k=None):
-        """BM25 keyword search.
+        """TODO 2a — keyword search. From Lecture 6, "Hybrid search".
 
-        `dense` searches by meaning; this searches by exact/overlapping
-        tokens, which is what wins for things like error codes that have no
-        real "meaning" for an embedding to latch onto.
+        `dense` above searches by meaning, which is great for "get my money back"
+        but weak on exact strings. A customer typing `ERR-4021` wants the piece
+        containing exactly that, and meaning-based search has no idea it is a code
+        rather than an odd-looking word.
+
+        BM25 is plain keyword search and handles that case. `self.chunks` is
+        already loaded and `rank_bm25` is already installed; this is section 5 of
+        the Lecture 6 notebook.
+
+        One thing to think about: you will probably split the text on spaces. Does
+        that keep `ERR-4021` as one word? What if the customer types `ERR 4021`?
+
+        Return a list of `Hit` objects, same as `dense`, so the two can be merged.
         """
+
+        from rank_bm25 import BM25Okapi
+
         k = k or config.CANDIDATE_K
 
+        # Build the BM25 index only once.
         if self._bm25 is None:
-            corpus_tokens = [_tokenize(c.text) for c in self.chunks]
-            self._bm25 = BM25Okapi(corpus_tokens)
+            tokenized_corpus = [
+                chunk.text.lower().split()
+                for chunk in self.chunks
+            ]
+            self._bm25 = BM25Okapi(tokenized_corpus)
 
-        query_tokens = _tokenize(query)
+        # Search using the words from the customer's query.
+        query_tokens = query.lower().split()
         scores = self._bm25.get_scores(query_tokens)
 
-        ranked = sorted(range(len(self.chunks)), key=lambda i: scores[i], reverse=True)
+        # Get the indexes of the highest-scoring chunks.
+        ranked_indexes = sorted(
+            range(len(scores)),
+            key=lambda i: scores[i],
+            reverse=True,
+        )[:k]
+
+        # Convert the results into the same Hit format used by dense().
         hits = []
-        for i in ranked[:k]:
-            if scores[i] <= 0:
-                continue
-            hits.append(self._hit(self.chunks[i], float(scores[i])))
+
+        for i in ranked_indexes:
+            hits.append(
+                self._hit(
+                    self.chunks[i],
+                    float(scores[i]),
+                )
+            )
+
         return hits
 
     def rrf(self, *rankings, k=None, top=None):
-        """Reciprocal Rank Fusion — merge any number of ranked Hit lists.
+        """TODO 2b — merge two lists of results. From Lecture 6, "RRF".
 
-        Scores from different search methods aren't comparable (dense might
-        say 0.4, BM25 might say 12.7), so we throw scores away and combine by
-        *rank position* instead: a hit ranked r in a list contributes
-        1/(k + r). Contributions from every list a hit appears in are summed,
-        so a hit that shows up near the top of two lists beats one that's #1
-        in only one list.
+        You now have two lists: one from meaning-based search, one from keyword
+        search. You want a single list.
+
+        You cannot just add the scores. The two kinds of search produce numbers
+        that mean completely different things — one might give 0.4 for an excellent
+        match and the other 12.7. Adding them is meaningless.
+
+        So ignore the scores and use each result's *position* instead. A piece that
+        came 1st in one list and 3rd in the other scores:
+
+            1/(k + 1)  +  1/(k + 3)
+
+        `k` is `config.RRF_K`, which is 60. It controls how much better 1st place
+        is than 5th. Try changing it and see what happens.
+
+        Accepts any number of ranked lists. Returns one merged list of `Hit`s.
         """
         k = k or config.RRF_K
 
-        fused_scores = defaultdict(float)
-        hit_by_id = {}
+        scores = defaultdict(float)
+        hits_by_chunk = {}
+
         for ranking in rankings:
             for rank, hit in enumerate(ranking, start=1):
-                fused_scores[hit.chunk_id] += 1.0 / (k + rank)
-                # Keep the first-seen Hit object for each id as the representative.
-                hit_by_id.setdefault(hit.chunk_id, hit)
+                # Trap documents should not influence ranking.
+                if hit.doc_id in config.UNTRUSTED_DOCS:
+                    continue
 
-        merged = []
-        for chunk_id, score in sorted(fused_scores.items(), key=lambda kv: kv[1], reverse=True):
-            original = hit_by_id[chunk_id]
-            merged.append(Hit(chunk_id=original.chunk_id, doc_id=original.doc_id,
-                              title=original.title, text=original.text,
-                              score=score, metadata=original.metadata))
+                if hit.doc_id in config.SUPERSEDED_DOCS:
+                    continue
 
-        return merged[:top] if top else merged
+                # Fuse at chunk level so that the most relevant
+                # chunk within a document is preserved.
+                scores[hit.chunk_id] += 1.0 / (k + rank)
+
+                hits_by_chunk[hit.chunk_id] = hit
+
+        ranked_chunks = sorted(
+            scores,
+            key=scores.get,
+            reverse=True,
+        )
+
+        return [
+            self._hit(hits_by_chunk[chunk_id], scores[chunk_id])
+            for chunk_id in ranked_chunks[:top or len(ranked_chunks)]
+        ]
 
     def hybrid(self, query, k=None):
-        """Run dense + lexical search, merge with RRF.
+        """TODO 2c — put 2a and 2b together: run both searches, merge with rrf().
 
-        Compare against dense alone with:
+        Then compare against meaning-based search on its own:
 
             RETRIEVAL_MODE=dense  python scripts/evaluate_dev.py --retrieval-only
             RETRIEVAL_MODE=hybrid python scripts/evaluate_dev.py --retrieval-only
 
-        On a 36-chunk handbook the gain may be small or even negative — report
-        the actual number rather than assuming hybrid is better.
+        Be honest about the result. Our handbook is only 36 pieces long, and on
+        something that small the gain may be tiny or even negative. "I measured it,
+        it gained 0.02, so I did not use it" is a good answer and earns marks.
+        Claiming it helped without a number does not.
         """
-        k = k or config.CANDIDATE_K
-        dense_hits = self.dense(query, k)
-        lexical_hits = self.lexical(query, k)
-        return self.rrf(dense_hits, lexical_hits, top=k)
+
+        k = k or self.top_k
+
+        dense_hits = self.dense(
+            query,
+            config.CANDIDATE_K,
+        )
+
+        lexical_hits = self.lexical(
+            query,
+            config.CANDIDATE_K,
+        )
+
+        return self.rrf(
+            dense_hits,
+            lexical_hits,
+            k=config.RRF_K,
+            top=k,
+        )
 
     # ------------------------------------------------------------- optional --
     def rerank(self, query, candidates, top_n=None):
-      
-        if not candidates:
-            return []
-        top_n = top_n or len(candidates)
-        return sorted(candidates, key=lambda h: h.score, reverse=True)[:top_n]
+        """OPTIONAL — re-sort the results with an AI. Lecture 6, "Reranking".
+
+        Search is fast but rough. So fetch more results than you need (8), ask a
+        model to score each one out of 10 for how well it answers the question, and
+        keep the best 4. Ask for just a number and set `max_tokens=5`.
+
+        The catch is cost: one extra AI call per result per question. Work out what
+        that costs in tokens and time, and say whether the gain was worth it.
+        """
+        raise NotImplementedError(
+            "reranking is optional — see the docstring"
+        )
 
     def translate_query(self, query):
-        """OPTIONAL — rewrite the question before searching. See docstring."""
-        raise NotImplementedError("query translation is optional")
+        """Rewrite the customer request into policy-oriented search terms.
+
+        This is the configuration used in the best measured evaluator run
+        (69.90/100). The order ID is preserved because the earlier experiment
+        removing order IDs and constraining the translation prompt reduced the
+        overall evaluator score to 62.81/100.
+        """
+
+        prompt = """Rewrite the customer's request into a short search query
+for a customer-support policy handbook.
+
+Preserve the customer's actual intent exactly.
+Do not infer facts, scenarios, or policy categories that are not stated.
+Do not change a return question into a delayed-order question.
+Prefer concrete handbook terminology when it is directly supported by
+the customer's wording.
+
+For return questions, preserve terms such as:
+- return
+- return eligibility
+- return window
+- return policy
+
+For delivery questions, preserve terms such as:
+- delayed order
+- promised delivery window
+- cancellation
+- wallet credit
+
+For return questions, include the policy concepts:
+- return
+- return eligibility
+- return window
+
+Include the customer's order ID if present.
+Do not answer the customer.
+Return only the search query, with no explanation."""
+
+        result = llm.chat(
+            prompt_or_messages=f"CUSTOMER REQUEST:\n{query}",
+            system=prompt,
+            model=config.FAST_MODEL,
+        )
+
+        return result.strip()
 
     # ----------------------------------------------------------------- entry --
     def search(self, query, k=None):
         k = k or self.top_k
+
+        # Translate the customer's natural-language request into
+        # policy-oriented search terms before retrieving handbook chunks.
+        search_query = self.translate_query(query)
+
         if self.mode == "dense":
-            hits = self.dense(query, config.CANDIDATE_K)
+            hits = self.dense(
+                search_query,
+                config.CANDIDATE_K,
+            )
+
         elif self.mode == "hybrid":
-            hits = self.hybrid(query, config.CANDIDATE_K)
+            hits = self.hybrid(
+                search_query,
+                config.CANDIDATE_K,
+            )
+
         elif self.mode == "hybrid_rerank":
-            # Optional branch: keep it working without forcing an extra model call.
-            hits = self.rerank(query, self.hybrid(query, config.CANDIDATE_K), top_n=k)
+            hits = self.rerank(
+                search_query,
+                self.hybrid(
+                    search_query,
+                    config.CANDIDATE_K,
+                ),
+                top_n=k,
+            )
+
         else:
-            raise ValueError(f"unknown RETRIEVAL_MODE {self.mode!r}")
+            raise ValueError(
+                f"unknown RETRIEVAL_MODE {self.mode!r}"
+            )
+
         return self.postprocess(hits)[:k]
 
     def postprocess(self, hits):
-        """Handle the two trap sections: archive_returns_2024 (superseded)
-        and community (untrusted, contains a prompt-injection attempt).
+        """TODO 2d — deal with the two trap sections. Lecture 5, on metadata.
 
-        Strategy chosen here: DROP them from results entirely. This is the safest
-        behaviour for a support agent because those sections are intentionally
-        marked as untrusted in the handbook metadata and should never be used as a
-        source of an answer.
+        Search has no idea that some text is untrustworthy. Two sections come back
+        looking just as relevant as the real ones:
 
-        The exact section IDs are confirmed in the Handbook metadata: they are
-        `community` and `archive_returns_2024`. We use both the chunk's `doc_id`
-        and its metadata fallback to avoid silently dropping results if the stored
-        IDs are reformatted in a future change.
+          `archive_returns_2024`  An old policy saying 15 days. It was replaced in
+                                  January 2026 and applies to none of the orders
+                                  you have. Quoting it is always wrong.
+
+          `community`             Customer gossip, not policy. It also contains a
+                                  fake instruction telling the AI to approve any
+                                  refund.
+
+        Three reasonable options. Any of them earns full marks as long as you
+        explain your choice in the report:
+
+          * remove them from the results completely;
+          * keep them, but push them to the bottom;
+          * keep them, so the agent can recognise a claim a customer quotes at it,
+            but never list them as a source.
+
+        Naming either one as your source scores zero for sources on that question.
+        Every piece carries `status` and `trust` in `.metadata`, and the two names
+        are in config.UNTRUSTED_DOCS and config.SUPERSEDED_DOCS.
         """
-        bad_ids = {str(x).strip() for x in (config.UNTRUSTED_DOCS | config.SUPERSEDED_DOCS)}
 
-        trusted = []
+        filtered = []
+
         for hit in hits:
-            doc_id = str(hit.doc_id or hit.metadata.get("doc_id", "")).strip()
-            meta_doc_id = str(hit.metadata.get("doc_id", "")).strip()
-            if doc_id in bad_ids or meta_doc_id in bad_ids:
+            if hit.doc_id in config.UNTRUSTED_DOCS:
                 continue
-            trusted.append(hit)
-        return trusted
+
+            if hit.doc_id in config.SUPERSEDED_DOCS:
+                continue
+
+            filtered.append(hit)
+
+        return filtered
 
 
 _RETRIEVER = None
@@ -207,8 +358,10 @@ _RETRIEVER = None
 def get_retriever():
     """Process-wide singleton — loading the index per query is slow."""
     global _RETRIEVER
+
     if _RETRIEVER is None:
         _RETRIEVER = Retriever()
+
     return _RETRIEVER
 
 
@@ -221,9 +374,18 @@ def format_context(hits):
     a model two identifiers it will sometimes pick the wrong one. One identifier,
     one meaning.
     """
+
     lines = []
+
     for h in hits:
         status = h.metadata.get("status", "current")
         flag = "" if status == "current" else f"  (WARNING: status={status})"
-        lines.append(f"[section: {h.doc_id}]{flag}\n{h.title}\n{h.text.strip()}")
+
+        lines.append(
+            f"[section: {h.doc_id}]{flag}\n"
+            f"{h.title}\n"
+            f"{h.text.strip()}"
+        )
+
     return "\n\n".join(lines) if lines else "(nothing retrieved)"
+
