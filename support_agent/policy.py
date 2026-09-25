@@ -197,4 +197,48 @@ def detect_injection(text):
     Return whatever is useful to you, and put it in the trace so a reader can see
     the agent noticed something.
     """
-    raise NotImplementedError("TODO 5 — see the docstring")
+   
+    """Detect common prompt-injection patterns in untrusted content.
+
+    This is a first security layer: it identifies text that attempts to
+    override the agent's instructions, bypass approval controls, or force
+    a specific response.
+
+    Detection does not grant or deny an action. Actual authority remains
+    enforced by code-level guardrails such as requires_approval().
+    """
+    text = str(text or "")
+    lowered = text.lower()
+
+    patterns = {
+        "instruction_override": [
+            r"\bignore\s+(all\s+)?previous\s+instructions?\b",
+            r"\bignore\s+(your\s+)?(policy|policies|rules|instructions?)\b",
+            r"\bsystem\s+override\b",
+            r"\bunrestricted\s+mode\b",
+            r"\bforget\s+(your\s+)?(previous\s+)?instructions?\b",
+        ],
+        "authority_bypass": [
+            r"\bapproval\s+limits?\b",
+            r"\bwithout\s+(approval|escalation|human\s+review)\b",
+            r"\bauthori[sz]ed\s+to\s+(issue|approve)\b",
+            r"\bapprove\s+any\s+refund\b",
+            r"\bof\s+any\s+amount\b",
+        ],
+        "forced_response": [
+            r"\breply\s+only\b",
+            r"\brespond\s+only\b",
+            r"\bwith\s+only\s+the\s+words\b",
+        ],
+    }
+
+    detected = []
+
+    for category, regexes in patterns.items():
+        if any(re.search(pattern, lowered) for pattern in regexes):
+            detected.append(category)
+
+    return {
+        "detected": bool(detected),
+        "patterns": detected,
+    }

@@ -5,16 +5,16 @@ and the tests. Keep the graph behind it so those three never drift apart.
 import time
 import traceback
 
-from . import config, llm, trace
+from . import config, llm, trace,policy
 from .graph import SupportGraph
 from .retrieval import get_retriever
-
-
+from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.messages import SystemMessage
 class SupportAgent:
     def __init__(self, checkpointer=None, interrupt_before=None):
-        self.retriever = get_retriever()          # load the index once, reuse it
-        self.checkpointer = checkpointer
-        self.interrupt_before = interrupt_before
+        self.retriever = get_retriever()
+        self.checkpointer = checkpointer or MemorySaver()
+        self.interrupt_before = interrupt_before or []
 
     def resolve(self, query_record, thread_id=None):
         """Run one customer query end to end. Returns a trace dict."""
@@ -44,6 +44,15 @@ class SupportAgent:
                      "steps": ["error"], "hits": []}
 
         after = llm.usage_snapshot()
+        injection_detection = []
+        for h in final.get("hits", []):
+            result = policy.detect_injection(h.get("text", ""))
+            if result["detected"]:
+                injection_detection.append({
+                "doc_id": h.get("doc_id", ""),
+                "patterns": result["patterns"],
+        })
+
         meta = {
             "latency_s": round(time.time() - started, 2),
             "llm_calls": after["calls"] - before["calls"],
@@ -53,7 +62,8 @@ class SupportAgent:
             "model": config.TOOL_MODEL,
             "retrieval_mode": config.RETRIEVAL_MODE,
             "graph_path": final.get("steps", []),
-            "retrieved": [h["doc_id"] for h in final.get("hits", [])],
+            "retrieved": [h.get("doc_id", "") for h in final.get("hits", [])],
+            "injection_detection": injection_detection,
         }
         record = trace.build(
             query_id=query_record["query_id"],
@@ -63,6 +73,7 @@ class SupportAgent:
             actions=final.get("actions", []),
             escalation=final.get("escalation"),
             meta=meta)
+        record["steps"] = final.get("steps", [])
         record["_debug"] = {"hits": final.get("hits", [])}   # dropped before submission
         return record
 
@@ -81,4 +92,41 @@ class SupportAgent:
 
         The Approve and Reject buttons in the web app call this function.
         """
-        raise NotImplementedError("resume() is yours to write — see the docstring")
+        graph = SupportGraph(
+            checkpointer=self.checkpointer,
+            interrupt_before=self.interrupt_before,
+            retriever=self.retriever,
+        )
+
+        cfg = {"configurable": {"thread_id": thread_id}}
+
+        snapshot = graph.graph.get_state(cfg)
+
+        if not snapshot.values:
+            raise ValueError(f"No checkpoint found for thread '{thread_id}'.")
+
+        if not approved:
+            graph.graph.update_state(
+                cfg,
+                {
+                    "route": "escalated",
+                    "answer": (
+                        "The requested action was not approved, "
+                        "so I will not proceed with it."
+                    ),
+                    "act_done": True,
+                },
+            )
+            return graph.graph.get_state(cfg).values
+
+        if note:
+            graph.graph.update_state(
+                cfg,
+                {
+                    "messages": [
+                        SystemMessage(content=f"Human approval note: {note}")
+                    ]
+                },
+            )
+
+        return graph.graph.invoke(None, cfg)

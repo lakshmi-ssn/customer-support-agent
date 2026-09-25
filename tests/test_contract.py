@@ -146,6 +146,25 @@ def test_node_act_runs_tool_calls_until_the_model_is_done(monkeypatch):
     assert any(getattr(m, "content", "") == "thanks" for m in out["messages"])
 
 
+def test_node_act_escalates_safety_incident_immediately():
+    from support_agent.graph import SupportGraph
+
+    g = SupportGraph(customer_id="C-1001")
+    state = {
+        "query": "My Meridian Pulse 5G started smoking while charging and there's a burnt smell.",
+        "customer_id": "C-1001",
+        "history": [],
+        "messages": [],
+        "hits": [],
+        "steps": [],
+    }
+
+    out = g.node_act(state)
+    assert out["route"] == "escalated"
+    assert any(a.get("tool") == "escalate_to_human" and a.get("status") == "executed"
+               for a in g.ctx.actions)
+
+
 # --------------------------------------------------------------------------- #
 # the submission contract
 # --------------------------------------------------------------------------- #
