@@ -279,9 +279,9 @@ class SupportGraph:
         like "where is my order?" that only need a record lookup. Searching when
         you do not need to costs money and adds irrelevant text.
         """
-        print("DEBUG RETRIEVE MESSAGES:", state.get("messages"))
+        # print("DEBUG RETRIEVE MESSAGES:", state.get("messages"))
         search_text = state["query"]
-        print("DEBUG RETRIEVE QUERY:", repr(search_text))
+        # print("DEBUG RETRIEVE QUERY:", repr(search_text))
         
         
         for message in state.get("messages", []):
@@ -291,7 +291,7 @@ class SupportGraph:
 
         hits = self.ctx.retriever.search(search_text)
         self.ctx.hits.extend(hits)
-        print("DEBUG RETRIEVE HITS:", [(h.doc_id, h.chunk_id, round(h.score, 4)) for h in hits])
+        # print("DEBUG RETRIEVE HITS:", [(h.doc_id, h.chunk_id, round(h.score, 4)) for h in hits])
 
         return {
             "steps": ["retrieve"],
@@ -603,11 +603,11 @@ ORDER FACTS:
                         )
                     )
 
-                    print(
-                        "DEBUG FORCED RETURN ELIGIBILITY:",
-                        order_id,
-                        eligibility_result,
-                    )
+                    # print(
+                    #     "DEBUG FORCED RETURN ELIGIBILITY:",
+                    #     order_id,
+                    #     eligibility_result,
+                    # )
 
                     messages.append(
                         SystemMessage(
@@ -644,8 +644,8 @@ ORDER FACTS:
                             window_days = first_item.get("window_days")
                             if window_days == 0 or "non-returnable" in first_item.get("reason", ""):
                                 answer = (
-                                    f"No, order {order_id} contains a non-returnable item. "
-                                    "Its return window is 0 days."
+                                    f"Order {order_id} is not eligible for return because "
+                                    "it contains a non-returnable item. Its return window is 0 days."
                                 )
                             else:
                                 answer = (
@@ -691,8 +691,8 @@ ORDER FACTS:
             # Add the LLM response to the conversation.
             messages.append(reply)
 
-            print("DEBUG tool_calls:", getattr(reply, "tool_calls", None))
-            print("DEBUG ACT CONTEXT:", context)
+            # print("DEBUG tool_calls:", getattr(reply, "tool_calls", None))
+            # print("DEBUG ACT CONTEXT:", context)
             # Check whether the LLM wants to call any tools.
             tool_calls = getattr(reply, "tool_calls", None) or []
 
@@ -761,19 +761,19 @@ ORDER FACTS:
                 else:
                     # Execute the actual Python tool.
                     try:
-                        print("DEBUG executing tool:", tool_name, tool_args)
+                        # print("DEBUG executing tool:", tool_name, tool_args)
                         result = self.tools[tool_name].invoke(tool_args)
-                        print("DEBUG tool result:", result)
+                        # print("DEBUG tool result:", result)
                         result = str(result)
 
-                        print(
-                            "DEBUG RETURN PRECHECK:",
-                            "tool_name=", tool_name,
-                            "is_get_order=", tool_name == "get_order",
-                            "has_return_word=", bool(re.search(r"\b(return|send back)\b", lower_query)),
-                            "has_eligibility_tool=", "check_return_eligibility" in self.tools,
-                            "lower_query=", lower_query,
-                        )
+                        # print(
+                        #     "DEBUG RETURN PRECHECK:",
+                        #     "tool_name=", tool_name,
+                        #     "is_get_order=", tool_name == "get_order",
+                        #     "has_return_word=", bool(re.search(r"\b(return|send back)\b", lower_query)),
+                        #     "has_eligibility_tool=", "check_return_eligibility" in self.tools,
+                        #     "lower_query=", lower_query,
+                        # )
 
                         # A return request requires an eligibility check after
                         # the order has been successfully looked up.
@@ -803,11 +803,11 @@ ORDER FACTS:
                                             )
                                         )
 
-                                        print(
-                                            "DEBUG FORCED RETURN ELIGIBILITY:",
-                                            order_id,
-                                            eligibility_result,
-                                        )
+                                        # print(
+                                        #     "DEBUG FORCED RETURN ELIGIBILITY:",
+                                        #     order_id,
+                                        #     eligibility_result,
+                                        # )
 
                                     except Exception as e:
                                         messages.append(
@@ -839,7 +839,7 @@ ORDER FACTS:
                                 "act_done": True,
                             }
                     except Exception as e:
-                        print("DEBUG tool ERROR:", tool_name, tool_args, repr(e))
+                        # print("DEBUG tool ERROR:", tool_name, tool_args, repr(e))
                         result = (
                             f"ERROR calling tool '{tool_name}' "
                             f"with arguments {tool_args}: {e}"
@@ -1174,15 +1174,15 @@ Do not add opinions or explanations."""
 
         # Break the answer into independently verifiable claims.
         claims = self._decompose_claims(answer)
-        print("DEBUG VERIFY ANSWER:", answer)
-        print("DEBUG VERIFY CLAIMS:", claims)
+        # print("DEBUG VERIFY ANSWER:", answer)
+        # print("DEBUG VERIFY CLAIMS:", claims)
 
         # Check every claim against the retrieved handbook context.
         supported = [
             self._claim_supported(claim, context_chunks)
             for claim in claims
         ]
-        print("DEBUG VERIFY SUPPORTED:", supported)
+        # print("DEBUG VERIFY SUPPORTED:", supported)
         # Same faithfulness calculation used in Lecture 6.
         faithfulness_score = (
             sum(supported) / len(supported)
@@ -1294,6 +1294,15 @@ Do not add opinions or explanations."""
                 answer_lower = answer_text.lower()
                 if (
                     state.get("route") == "escalated"
+                    and "safety incident" in answer_lower
+                    and "damage" in allowed_ids
+                    and "escalation" in allowed_ids
+                ):
+                    # Safety guidance comes from the damage/safety policy;
+                    # the human-review priority comes from the escalation matrix.
+                    answer_citations = ["damage", "escalation"]
+                elif (
+                    state.get("route") == "escalated"
                     and "escalation" in allowed_ids
                 ):
                     answer_citations = ["escalation"]
@@ -1314,7 +1323,7 @@ Do not add opinions or explanations."""
                     "citations": answer_citations,
                     "route": state.get("route", "resolved"),
                 }
-                print("DEBUG RESPOND PRESERVED ANSWER:", out)
+                # print("DEBUG RESPOND PRESERVED ANSWER:", out)
                 
             else:
                 out = llm.chat_json(
@@ -1323,7 +1332,7 @@ Do not add opinions or explanations."""
                     schema_hint=ROUTE_SCHEMA,
                     model=config.TOOL_MODEL,
                 )
-                print("DEBUG RAW RESPONSE:", out)
+                # print("DEBUG RAW RESPONSE:", out)
         except Exception as e:  # noqa: BLE001
             out = {"answer": f"(agent error: {e})", "citations": [], "route": "escalated"}
 
@@ -1424,16 +1433,16 @@ Do not add opinions or explanations."""
             interrupt_before=self._interrupt_before,
             retriever=self.ctx.retriever,
         )
-        print(
-            "DEBUG NEW CTX:",
-            query_id,
-            "graph_id:",
-            id(runner),
-            "ctx_id:",
-            id(runner.ctx),
-            "actions:",
-            list(runner.ctx.actions),
-        )
+        # print(
+        #     "DEBUG NEW CTX:",
+        #     query_id,
+        #     "graph_id:",
+        #     id(runner),
+        #     "ctx_id:",
+        #     id(runner.ctx),
+        #     "actions:",
+        #     list(runner.ctx.actions),
+        # )
 
         state = {
             "query_id": query_id,
@@ -1449,16 +1458,16 @@ Do not add opinions or explanations."""
 
         final = runner.graph.invoke(state, cfg)
 
-        print(
-            "DEBUG FINAL query:",
-            query_id,
-            "graph_id:",
-            id(runner),
-            "ctx_id:",
-            id(runner.ctx),
-            "ctx.actions:",
-            runner.ctx.actions,
-        )
+        # print(
+        #     "DEBUG FINAL query:",
+        #     query_id,
+        #     "graph_id:",
+        #     id(runner),
+        #     "ctx_id:",
+        #     id(runner.ctx),
+        #     "ctx.actions:",
+        #     runner.ctx.actions,
+        # )
         final["actions"] = list(runner.ctx.actions)
         final["escalation"] = runner._escalation_packet(final)
 
