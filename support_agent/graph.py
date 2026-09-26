@@ -31,6 +31,7 @@ The rules the agent needs — return windows, refund limits, when to fetch a hum
 are already written in `policy.py`. You are building the thing that uses them.
 """
 
+import json
 import re
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
@@ -69,6 +70,21 @@ def _customer_question(text):
     return (text or "").strip()
 
 
+def _order_ids_for_query(query, history=None):
+    """Find an order ID in the current message or the most recent history turn."""
+    order_ids = ORDER_ID_RE.findall(query or "")
+    if order_ids:
+        return list(dict.fromkeys(order_id.upper() for order_id in order_ids))
+
+    for turn in reversed(history or []):
+        content = as_text(turn.get("content", "")) if isinstance(turn, dict) else as_text(turn)
+        order_ids = ORDER_ID_RE.findall(content)
+        if order_ids:
+            return list(dict.fromkeys(order_id.upper() for order_id in order_ids))
+
+    return []
+
+
 SYSTEM_PROMPT = """You are Meridian's customer-support agent. Meridian is an Indian \
 online electronics retailer. You are talking to a customer.
 
@@ -105,6 +121,8 @@ class SupportGraph:
 
     def __init__(self, customer_id=None, checkpointer=None, interrupt_before=None,
                  retriever=None):
+        self._checkpointer = checkpointer
+        self._interrupt_before = interrupt_before or []
         self.ctx = ToolContext(customer_id=customer_id, retriever=retriever)
         self.tools = {t.name: t for t in make_tools(self.ctx)}
 
@@ -163,8 +181,10 @@ class SupportGraph:
         #      order number appears only in the earlier turn, never in the question
         #      itself. Then finish `agentst.resume()` so Approve and Reject do
         #      something.
-        self.graph = graph.compile(checkpointer=checkpointer,
-                                   interrupt_before=interrupt_before or [])
+        self.graph = graph.compile(
+            checkpointer=self._checkpointer,
+            interrupt_before=self._interrupt_before,
+        )
 
     def node_triage(self, state):
         """Decide whether the request needs information or can continue."""
@@ -217,15 +237,11 @@ class SupportGraph:
 
     # ------------------------------------------------------------- nodes ---- #
     def node_lookup(self, state):
-        """A stand-in for triage: find an order number with a regex and fetch it.
+        """Find order numbers in the customer message and fetch their facts."""
 
-        TODO 6a: replace this with a step that actually works out what kind of
-        message this is and picks a route. A regular expression can never ask
-        "which order do you mean?", which is why this program can never produce
-        the `needs_info` answer.
-        """        
         query = state["query"]
-        order_ids = re.findall(r"MRD-\d+", query, re.IGNORECASE)
+        order_ids = _order_ids_for_query(query, state.get("history", []))
+
         facts = []
 
         for order_id in order_ids:
@@ -233,24 +249,27 @@ class SupportGraph:
                 result = self.tools["get_order"].invoke({
                     "order_id": order_id.upper()
                 })
-
                 facts.append(result)
-
             except Exception as e:
                 facts.append(
                     f"ERROR looking up order {order_id}: {e}"
                 )
 
-        if facts:
-            state["messages"].append(
+        if not facts:
+            return {
+                "steps": ["lookup"],
+            }
+
+        return {
+            "steps": ["lookup"],
+            "messages": [
                 SystemMessage(
                     content="ORDER FACTS:\n" + "\n".join(
                         as_text(f) for f in facts
                     )
                 )
-            )
-
-        return state
+            ],
+        }
 
     def node_retrieve(self, state):
         """Search the handbook using the customer's message, word for word.
@@ -381,6 +400,31 @@ class SupportGraph:
                         )
                     )
 
+        if is_escalated and reason == "repeat_failure":
+            if not any(
+                action.get("tool") == "escalate_to_human"
+                and action.get("status") == "executed"
+                for action in self.ctx.actions
+            ):
+                self.tools["escalate_to_human"].invoke({
+                    "priority": priority or "P2",
+                    "reason_code": "repeat_failure",
+                    "summary": (
+                        "Repeat failure reported for customer "
+                        f"{state.get('customer_id')}: {query_text}"
+                    ),
+                })
+            return {
+                "steps": ["act"],
+                "messages": messages,
+                "route": "escalated",
+                "answer": (
+                    "Since this issue has been raised repeatedly and remains "
+                    "unresolved, I am escalating it to a human specialist for review."
+                ),
+                "act_done": True,
+            }
+
         # Give the tool-calling model the same grounding information
         # that the response generator will use later.
         context = "\n\n".join(
@@ -456,6 +500,176 @@ ORDER FACTS:
         # Make sure the customer's question is available to the model.
         if not any(isinstance(m, HumanMessage) for m in messages):
             messages.append(HumanMessage(content=state["query"]))
+
+        # Apply the delayed-delivery goodwill credit when the customer raises
+        # a missed-promise complaint and order facts confirm late delivery.
+        late_delivery_complaint = re.search(
+            r"\b(missed the delivery date|missed the promised date|late delivery|"
+            r"delivery was late|delivered late)\b",
+            lower_query,
+        )
+        order_ids = ORDER_ID_RE.findall(query_text)
+        if (
+            late_delivery_complaint
+            and order_ids
+            and state.get("customer_id")
+            and "issue_wallet_credit" in self.tools
+        ):
+            requested_order_id = order_ids[0].upper()
+            order = None
+            for message in state.get("messages", []):
+                if not isinstance(message, SystemMessage):
+                    continue
+                content = as_text(message.content)
+                if not content.startswith("ORDER FACTS:\n"):
+                    continue
+                try:
+                    candidate = json.loads(content.split("ORDER FACTS:\n", 1)[1])
+                except (TypeError, ValueError):
+                    continue
+                if candidate.get("order_id", "").upper() == requested_order_id:
+                    order = candidate
+                    break
+
+            if (
+                order
+                and order.get("status") == "delivered"
+                and order.get("promised_by")
+                and order.get("delivered_at")
+                and order["delivered_at"] > order["promised_by"]
+            ):
+                try:
+                    credit_result = self.tools["issue_wallet_credit"].invoke({
+                        "customer_id": state["customer_id"],
+                        "amount_inr": 500,
+                        "reason": "Goodwill credit for missed delivery date",
+                    })
+                    messages.append(
+                        ToolMessage(
+                            content=str(credit_result),
+                            tool_call_id="missed_delivery_wallet_credit",
+                        )
+                    )
+                    return {
+                        "steps": ["act"],
+                        "messages": messages,
+                        "route": "resolved",
+                        "answer": (
+                            "Your order was delivered after its promised date. "
+                            "I have credited 500 rupees to your wallet as a "
+                            "goodwill gesture for the delay."
+                        ),
+                        "act_done": True,
+                    }
+                except Exception as e:
+                    messages.append(
+                        ToolMessage(
+                            content=f"ERROR issuing missed-delivery wallet credit: {e}",
+                            tool_call_id="missed_delivery_wallet_credit",
+                        )
+                    )
+
+        # Carry an order reference forward for short follow-up questions.
+        contextual_order_ids = _order_ids_for_query(
+            query_text, state.get("history", [])
+        )
+
+        # Deterministic return-eligibility precheck.
+        # lookup may already have called get_order, so do not wait
+        # for the LLM to request it again.
+        if (
+            re.search(r"\b(return|send(?: it)? back|deadline)\b", lower_query)
+            and contextual_order_ids
+            and "check_return_eligibility" in self.tools
+        ):
+            order_id = contextual_order_ids[0]
+
+            if order_id and not any(
+                a.get("tool") == "check_return_eligibility"
+                and a.get("status") == "executed"
+                for a in self.ctx.actions
+            ):
+                try:
+                    eligibility_result = self.tools[
+                        "check_return_eligibility"
+                    ].invoke({
+                        "order_id": order_id
+                    })
+
+                    messages.append(
+                        ToolMessage(
+                            content=str(eligibility_result),
+                            tool_call_id="return_eligibility_precheck",
+                        )
+                    )
+
+                    print(
+                        "DEBUG FORCED RETURN ELIGIBILITY:",
+                        order_id,
+                        eligibility_result,
+                    )
+
+                    messages.append(
+                        SystemMessage(
+                            content=(
+                                "AUTHORITATIVE RETURN ELIGIBILITY RESULT:\n"
+                                f"{json.dumps(eligibility_result, indent=2)}\n"
+                                "Use this result as authoritative. Do not recalculate return eligibility yourself."
+                            )
+                        )
+                    )
+
+                    # Eligibility questions need an answer, not an unrequested
+                    # return transaction. Use the tool's result for both facts
+                    # and route so a weak model response cannot override it.
+                    if re.search(r"\b(inside|eligible|eligibility|return window|send(?: it)? back|deadline)\b", lower_query):
+                        eligibility = json.loads(eligibility_result)
+                        eligibility_items = eligibility.get("items", [])
+                        item = next(
+                            (entry for entry in eligibility_items
+                             if entry.get("eligible")),
+                            None,
+                        )
+                        if item:
+                            window_days = item.get("window_days")
+                            deadline = item.get("deadline")
+                            answer = (
+                                f"Yes, order {order_id} is inside the return window. "
+                                f"As a {eligibility.get('customer_tier', '')} customer, "
+                                f"the window is {window_days} days from delivery, and "
+                                f"the return deadline is {deadline}."
+                            )
+                        else:
+                            first_item = eligibility_items[0] if eligibility_items else {}
+                            window_days = first_item.get("window_days")
+                            if window_days == 0 or "non-returnable" in first_item.get("reason", ""):
+                                answer = (
+                                    f"No, order {order_id} contains a non-returnable item. "
+                                    "Its return window is 0 days."
+                                )
+                            else:
+                                answer = (
+                                    f"No, you can no longer send order {order_id} back. "
+                                    f"Its return window was {window_days} days and has closed."
+                                )
+                        return {
+                            "steps": ["act"],
+                            "messages": messages,
+                            "route": "resolved",
+                            "answer": answer,
+                            "act_done": True,
+                        }
+
+                except Exception as e:
+                    messages.append(
+                        ToolMessage(
+                            content=(
+                                "ERROR calling "
+                                f"check_return_eligibility: {e}"
+                            ),
+                            tool_call_id="return_eligibility_precheck",
+                        )
+                    )
 
         for step in range(config.MAX_TOOL_STEPS):
             # Ask the LLM what to do next.
@@ -581,18 +795,27 @@ ORDER FACTS:
                                         ].invoke({
                                             "order_id": order_id
                                         })
+
                                         messages.append(
                                             ToolMessage(
                                                 content=str(eligibility_result),
                                                 tool_call_id="return_eligibility_precheck",
                                             )
                                         )
+
+                                        print(
+                                            "DEBUG FORCED RETURN ELIGIBILITY:",
+                                            order_id,
+                                            eligibility_result,
+                                        )
+
                                     except Exception as e:
                                         messages.append(
                                             ToolMessage(
                                                 content=(
                                                     "ERROR calling "
-                                                    f"check_return_eligibility: {e}"
+                                                    "check_return_eligibility: "
+                                                    f"{e}"
                                                 ),
                                                 tool_call_id="return_eligibility_precheck",
                                             )
@@ -719,10 +942,8 @@ ORDER FACTS:
             "create_return",
             "cancel_order",
             "issue_refund",
-            "issue_wallet_credit"
-            #"check_return_eligibility",
-            #"get_order",
-            #"list_customer_orders",
+            "issue_wallet_credit",
+            "check_return_eligibility",
         } for a in actions):
             return "resolved"
 
@@ -941,6 +1162,16 @@ Do not add opinions or explanations."""
 
         context_chunks.extend(order_fact_chunks)
 
+        # Eligibility answers may rely on the authoritative result of the
+        # check_return_eligibility tool, including its computed deadline.
+        eligibility_results = [
+            as_text(message.content)
+            for message in state.get("messages", [])
+            if isinstance(message, ToolMessage)
+            and message.tool_call_id == "return_eligibility_precheck"
+        ]
+        context_chunks.extend(eligibility_results)
+
         # Break the answer into independently verifiable claims.
         claims = self._decompose_claims(answer)
         print("DEBUG VERIFY ANSWER:", answer)
@@ -1059,9 +1290,28 @@ Do not add opinions or explanations."""
 
         try:
             if state.get("answer"):
+                answer_text = as_text(state["answer"])
+                answer_lower = answer_text.lower()
+                if (
+                    state.get("route") == "escalated"
+                    and "escalation" in allowed_ids
+                ):
+                    answer_citations = ["escalation"]
+                elif "returns" in allowed_ids and re.search(
+                    r"\b(return|returnable|return window|send back)\b",
+                    answer_lower,
+                ):
+                    answer_citations = ["returns"]
+                elif "shipping" in allowed_ids and re.search(
+                    r"\b(delivery|delivered|delay|wallet credit)\b",
+                    answer_lower,
+                ):
+                    answer_citations = ["shipping"]
+                else:
+                    answer_citations = allowed_ids[:2]
                 out = {
-                    "answer": as_text(state["answer"]),
-                    "citations": allowed_ids[:2],
+                    "answer": answer_text,
+                    "citations": answer_citations,
                     "route": state.get("route", "resolved"),
                 }
                 print("DEBUG RESPOND PRESERVED ANSWER:", out)
@@ -1166,21 +1416,24 @@ Do not add opinions or explanations."""
 
     # -------------------------------------------------------------- entry --- #
     def run(self, query_id, query, customer_id=None, history=None, thread_id=None):
-
-        # Fresh tool context for every test/query
-        self.ctx = ToolContext(
+        # Keep per-query actions and tools on a dedicated graph instance. This
+        # avoids concurrent calls replacing each other's mutable self.ctx/tools.
+        runner = SupportGraph(
             customer_id=customer_id,
+            checkpointer=self._checkpointer,
+            interrupt_before=self._interrupt_before,
             retriever=self.ctx.retriever,
         )
         print(
             "DEBUG NEW CTX:",
             query_id,
+            "graph_id:",
+            id(runner),
             "ctx_id:",
-            id(self.ctx),
+            id(runner.ctx),
             "actions:",
-            list(self.ctx.actions),
+            list(runner.ctx.actions),
         )
-        self.tools = {t.name: t for t in make_tools(self.ctx)}
 
         state = {
             "query_id": query_id,
@@ -1194,11 +1447,20 @@ Do not add opinions or explanations."""
 
         cfg = {"configurable": {"thread_id": thread_id or query_id}}
 
-        final = self.graph.invoke(state, cfg)
+        final = runner.graph.invoke(state, cfg)
 
-        print("DEBUG FINAL query:", query_id, "ctx.actions:", self.ctx.actions)
-        final["actions"] = list(self.ctx.actions)
-        final["escalation"] = self._escalation_packet(final)
+        print(
+            "DEBUG FINAL query:",
+            query_id,
+            "graph_id:",
+            id(runner),
+            "ctx_id:",
+            id(runner.ctx),
+            "ctx.actions:",
+            runner.ctx.actions,
+        )
+        final["actions"] = list(runner.ctx.actions)
+        final["escalation"] = runner._escalation_packet(final)
 
         return final
 

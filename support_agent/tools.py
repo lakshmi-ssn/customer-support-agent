@@ -139,6 +139,7 @@ def make_tools(ctx):
             window = policy.return_window_days(item["category"], tier)
             if window == 0:
                 lines.append({"sku": item["sku"], "eligible": False,
+                              "window_days": 0,
                               "reason": f"{item['category']} is non-returnable"})
                 continue
             if o["status"] != "delivered" or not o["delivered_at"]:
