@@ -27,7 +27,8 @@ class SupportState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], operator.add]
     hits: list                          # retrieval Hits, as dicts
     steps: Annotated[list[str], operator.add]   # node names, in order visited
-
+    act_done: bool
+    
     # --- outputs (these become the trace) -------------------------------------
     answer: str
     route: str                          # resolved | needs_info | escalated

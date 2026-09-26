@@ -145,7 +145,70 @@ def split_structured(sections, size, overlap):
 
     Return the same thing split_fixed returns: a list of (section, text) pairs.
     """
-    raise NotImplementedError("TODO 1 — see the docstring")
+    if size <= overlap:
+        raise ValueError("CHUNK_SIZE must exceed CHUNK_OVERLAP")
+
+    out = []
+
+    for section in sections:
+        prefix = f"{section.title}\n\n"
+        available = size - len(prefix)
+
+        if available <= 0:
+            raise ValueError("CHUNK_SIZE is too small for the section title")
+
+        text = section.text.strip()
+        overlap_prefix = 0
+
+        while text:
+            if len(text) <= available:
+                out.append((section, prefix + text))
+                break
+
+            # 1. Prefer a ### sub-heading boundary.
+            candidates = [
+                m.start()
+                for m in re.finditer(r"(?m)^###\s+.+$", text)
+                if overlap_prefix < m.start() <= available
+            ]
+
+            # 2. Otherwise prefer a blank line between paragraphs.
+            if not candidates:
+                candidates = [
+                    m.end()
+                    for m in re.finditer(r"\n\s*\n", text[:available + 1])
+                    if overlap_prefix < m.end() <= available
+                ]
+
+            # 3. Otherwise use the end of a sentence.
+            if not candidates:
+                candidates = [
+                    m.end()
+                    for m in re.finditer(r"[.!?](?:[\"')\]]+)?(?:\s|$)", text[:available + 1])
+                    if overlap_prefix < m.end() <= available
+                ]
+
+            # 4. Last resort: hard cut.
+            cut = max(candidates) if candidates else available
+
+            piece = text[:cut].strip()
+            if piece:
+                out.append((section, prefix + piece))
+
+            remaining = text[cut:].strip()
+
+            # Keep a small amount of overlap, but never cross a section.
+            # A heading is already a useful boundary and must not be shifted
+            # forward by overlap, or the same heading can be selected repeatedly.
+            if (overlap > 0 and piece and cut > overlap
+                    and not re.match(r"^###\s+", remaining)):
+                overlap_text = piece[-overlap:].strip()
+                text = overlap_text + "\n\n" + remaining
+                overlap_prefix = len(overlap_text) + 2
+            else:
+                text = remaining
+                overlap_prefix = 0
+    return out
 
 
 def chunk_documents(sections, size=None, overlap=None, strategy="fixed"):

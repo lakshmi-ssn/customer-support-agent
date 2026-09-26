@@ -26,10 +26,34 @@ The latest retrieval-only experiment compared dense retrieval with hybrid retrie
 | TODO 2 — hybrid retrieval measurement                |  20/29 = 69.0% recall@4 | yes                 |
 | TODO 3 — answer verification against handbook claims | focused tests passed; full-flow impact not isolated | yes, with limitations |
 | TODO 6 — partial triage/branch wiring                | 80.73 / 100 full-flow checkpoint; memory and approval not implemented | in progress |
-| TODO 5 — fake-instruction defense                    | not measured separately | —                   |
-| TODO 1 — structured handbook splitting               | not measured separately | —                   |
+| TODO 5 — fake-instruction defense                    | injection 85.00; 0 safety violations; 37 tests passed | yes                 |
+| TODO 1 — structured handbook splitting               | 14 sections → 46 chunks; dense recall 20/29 = 69.0% | yes                 |
 
 The retrieval experiment shows a modest improvement from hybrid retrieval. The gain is 1 additional successful retrieval case out of 29, equivalent to 3.5 percentage points.
+
+### TODO5 — Prompt Injection Defense
+
+Implemented prompt-injection detection and escalation handling for untrusted
+customer, ticket, tool, and handbook content.
+
+- Added detection for prompt-injection attempts in customer queries and retrieved or ticket content.
+- Injection attempts are treated as untrusted content and are not followed as instructions.
+- Injection cases are escalated to a human using `escalate_to_human` with the appropriate reason and priority.
+- Verified that malicious ticket content does not bypass refund or approval policies.
+- Added dedicated tests for detection, `<untrusted>` boundaries, blocked refunds, and injection escalation.
+- The dedicated TODO 5 tests passed, and the full test suite passed with **37 tests**.
+- The implementation produced **0 safety violations** in the development evaluation.
+
+**Evaluation result:**
+
+- Injection category score: **85.00**
+- Safety violations: **0**
+
+The latest full development evaluation scored **77.08 / 100** across 24
+queries. This is an overall system score, not a TODO 5-only score.
+
+The remaining score loss in the injection category is primarily related to
+response, fact, and citation matching rather than unsafe execution.
 
 ### TODO3 checkpoint
 
@@ -229,6 +253,43 @@ The tool-calling loop allows the model to request available tools and receive th
 ## 1. Searching the handbook
 
 The handbook is loaded by `support_agent.kb.load_sections()`, which reads Markdown files under `config.KB_DIR`, currently `data/kb/handbook.md`.
+
+### TODO 1 — Structured Knowledge-Base Chunking
+
+Implemented `split_structured()` to split the handbook into chunks at meaningful
+text boundaries while keeping chunks within individual handbook sections. The
+splitter prefers subsection headings, paragraph boundaries, and sentence
+boundaries, and maintains the configured overlap without crossing section
+boundaries.
+
+The knowledge-base index was rebuilt successfully with the structured strategy.
+
+| Build setting | Result |
+| --- | ---: |
+| Handbook sections | **14** |
+| Chunks generated | **46** |
+| Chunk size | **600** |
+| Chunk overlap | **150** |
+| Strategy | **structured** |
+| Index | successfully created under `.index` |
+
+The corresponding dense retrieval evaluation achieved **20/29 = 69.0%** recall@4.
+
+| Category | Recall@4 |
+| --- | ---: |
+| `cancellation` | 50% |
+| `refund_needs_approval` | 50% |
+| `safety_incident` | 50% |
+| `injection` | 50% |
+| `return_eligibility` | 67% |
+| `policy_qa` | 100% |
+| `stale_policy` | 100% |
+| `refund_within_limit` | 100% |
+| `escalate_other` | 100% |
+| `multi_turn` | 100% |
+
+Structured chunking and index construction completed successfully. The
+remaining retrieval gaps were addressed by the subsequent TODO 2 retrieval work.
 
 The retrieval configuration is:
 

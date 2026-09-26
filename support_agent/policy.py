@@ -104,7 +104,7 @@ ESCALATION_REASONS = {
 _TRIGGERS = [
     ("safety_incident", r"swollen|swelling|bulg(e|ing)|smok(e|ing)|\bfire\b|burn(t|ing|ed)?"
                         r"|overheat|explod|melted|shock"),
-    ("legal_or_chargeback", r"lawyer|legal notice|consumer (forum|court)|sue\b|suing|court"
+    ("legal_or_chargeback", r"lawyer|legal notice|consumer (forum|court)|\bsue\b|suing|court"
                             r"|chargeback|litigat|advocate"),
     ("privacy_statutory", r"dpdp|data protection|grievance officer|data principal"
                           r"|erasure|right to be forgotten|delete (all )?my (personal )?data"),
@@ -140,7 +140,20 @@ def classify_escalation(query, records=None, customer_id=None):
         seen = {}
         for t in records.tickets_for_customer(customer_id):
             seen[t["issue_type"]] = seen.get(t["issue_type"], 0) + 1
-        if any(n >= 3 for n in seen.values()):
+        repeated_orders = {
+            t["order_id"]
+            for t in records.tickets_for_customer(customer_id)
+            if seen.get(t["issue_type"], 0) >= 3 and t.get("order_id")
+        }
+        repeated_issue_signal = re.search(
+            r"\b(again|three times|raised .*times|still not fixed|"
+            r"previous troubleshooting|repeated|same defect)\b",
+            text,
+        )
+        if repeated_orders and repeated_issue_signal and any(
+            order_id.lower() in text
+            for order_id in repeated_orders
+        ):
             return True, "repeat_failure", "P2"
     return False, "", ""
 
