@@ -755,6 +755,9 @@ ORDER FACTS:
             customer_id=customer_id,
         )
         if is_escalated:
+            if reason == "repeat_failure":
+                return None, None
+
             if not any(
                 a.get("tool") == "escalate_to_human"
                 and a.get("status") == "executed"
@@ -1168,6 +1171,14 @@ Do not add opinions or explanations."""
         self.ctx = ToolContext(
             customer_id=customer_id,
             retriever=self.ctx.retriever,
+        )
+        print(
+            "DEBUG NEW CTX:",
+            query_id,
+            "ctx_id:",
+            id(self.ctx),
+            "actions:",
+            list(self.ctx.actions),
         )
         self.tools = {t.name: t for t in make_tools(self.ctx)}
 
