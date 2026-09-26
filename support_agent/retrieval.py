@@ -237,34 +237,28 @@ class Retriever:
         """
 
         prompt = """Rewrite the customer's request into a short search query
-for a customer-support policy handbook.
+        for a customer-support policy handbook.
 
-Preserve the customer's actual intent exactly.
-Do not infer facts, scenarios, or policy categories that are not stated.
-Do not change a return question into a delayed-order question.
-Prefer concrete handbook terminology when it is directly supported by
-the customer's wording.
+        Preserve the customer's actual intent exactly.
+        Do not infer facts, scenarios, or policy categories that are not stated.
+        Do not change a return question into a delayed-order question.
+        Prefer concrete handbook terminology when it is directly supported by
+        the customer's wording.
 
-For return questions, preserve terms such as:
-- return
-- return eligibility
-- return window
-- return policy
+        For return questions, preserve terms such as:
+        - return
+        - return eligibility
+        - return window
+        - return policy
 
-For delivery questions, preserve terms such as:
-- delayed order
-- promised delivery window
-- cancellation
-- wallet credit
+        For delivery questions, preserve terms such as:
+        - delayed order
+        - promised delivery window
+        - cancellation
+        - wallet credit
 
-For return questions, include the policy concepts:
-- return
-- return eligibility
-- return window
-
-Include the customer's order ID if present.
-Do not answer the customer.
-Return only the search query, with no explanation."""
+        Include the customer's order ID if present.Do not answer the customer.
+        Return only the search query, with no explanation."""
 
         result = llm.chat(
             prompt_or_messages=f"CUSTOMER REQUEST:\n{query}",

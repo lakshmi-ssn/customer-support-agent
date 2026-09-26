@@ -1,4 +1,4 @@
-"""The ten things the agent can do.
+"""The tools the agent can use.
 
 A "tool" is just a Python function the model is allowed to ask for. The model
 never runs code itself. It says "please call get_order with MRD-700121", your
@@ -56,6 +56,18 @@ def _json(obj):
 
 def make_tools(ctx):
     """Build the tool objects bound to one ToolContext. Returns a list."""
+
+    @tool
+    def request_clarification(question: str) -> str:
+        """Ask the customer for required information before proceeding.
+
+        Use this when the request depends on a specific order or other required
+        detail that is missing from the message, conversation history, and
+        available facts. Do not guess or invent the missing information.
+        """
+        question = question.strip() or "Could you provide the missing information?"
+        ctx.log("request_clarification", {"question": question}, "executed")
+        return question
 
     @tool
     def search_knowledge_base(query: str) -> str:
@@ -198,6 +210,6 @@ def make_tools(ctx):
         return (f"Escalated at {priority} ({reason_code}). A human will pick this up; "
                 f"the queue is staffed 09:00-21:00 IST.")
 
-    return [search_knowledge_base, get_order, list_customer_orders, get_ticket_history,
+    return [request_clarification, search_knowledge_base, get_order, list_customer_orders, get_ticket_history,
             check_return_eligibility, create_return, cancel_order, issue_refund,
             issue_wallet_credit, escalate_to_human]
