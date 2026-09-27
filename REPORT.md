@@ -1,666 +1,179 @@
-# HW2 Report — <your name>, <roll number>
+﻿# HW2 Report — Lakshmi Suryanarayanan
 
 ## The short version
 
-|                                    | Score / measurement |
-| ---------------------------------- | ------------------: |
-| Shipped baseline                   |         70.31 / 100 |
-| TODO 4 result (first recorded run) |         71.67 / 100 |
-| Route-fix checkpoint               |         77.40 / 100 |
-| Final tuned run                   |         80.00 / 100 |
-| Latest full evaluation (24 queries) |       **80.73 / 100** |
-| Dense retrieval recall@4           |       19/29 = 65.5% |
-| Hybrid retrieval recall@4          |       20/29 = 69.0% |
+| | Score on 24 practice questions |
+|---|---:|
+| Shipped baseline | 70.31 |
+| Highest recorded run (hybrid, cache disabled) | **94.58** |
+| Dense comparison run | 92.92 |
 
-I used model `openai/gpt-4o-mini`, with chunks of 600 characters. The API cost was not recorded in this run: `<add the amount from OpenRouter usage>`.
+The latest no-cache hybrid development evaluation scored **94.58 / 100**. It reported route **1.000**, actions **0.979**, facts **1.000**, citations **0.688**, and **0 safety violations**. This is not a score on the hidden 72-query test set. The weakest query was `dev-008` (0.78), which missed `create_return`. The dense run scored 92.92 on the same practice set, so the latest hybrid run was 1.66 points higher; model output can vary between runs, so this is an observed comparison, not proof that hybrid caused the gain.
 
-The latest retrieval-only experiment compared dense retrieval with hybrid retrieval using BM25 lexical search and Reciprocal Rank Fusion (RRF). Dense retrieval achieved 19/29 (65.5%) recall@4, while hybrid retrieval achieved 20/29 (69.0%), an improvement of 1 case or 3.5 percentage points.
+I used `openai/gpt-4o-mini` as the tool-capable model and `meta-llama/llama-3.1-8b-instruct` as the fast model. The default retrieval mode is dense; chunks are 600 characters with 150 characters of overlap. The latest hybrid run disabled the LLM cache and made 95 GPT-4o-mini calls (80,651 input and 1,927 output tokens) and 17 Llama calls (7,501 input and 201 output tokens). Cost was estimated per model as `(input_tokens × input_rate + output_tokens × output_rate) ÷ 1,000,000`, using listed rates in USD per million tokens: GPT-4o-mini `(80,651 × $0.15 + 1,927 × $0.60) ÷ 1,000,000 = $0.013254`; Llama `(7,501 × $0.02 + 201 × $0.04) ÷ 1,000,000 = $0.000158`. The combined estimate is **$0.013412**. The estimate covers this 24-query run only, not the cumulative cost of all experiments. OpenRouter rates can change, so this estimate uses the rates recorded in `support_agent/config.py` at run time ([GPT-4o-mini pricing](https://openrouter.ai/openai/gpt-4o-mini), [Llama pricing](https://openrouter.ai/meta-llama/llama-3.1-8b-instruct)). The traces are in `dev_traces_hybrid_nocache.jsonl`.
 
 ## What I changed, and what each change was worth
 
-| What I did                                           |    Result / measurement | Kept it?            |
-| ---------------------------------------------------- | ----------------------: | ------------------- |
-| Starting point / shipped baseline                    |             70.31 / 100 | yes                 |
-| TODO 4 — tool-calling loop                           |             71.67 / 100 | yes                 |
-| TODO 2 — dense retrieval measurement                 |  19/29 = 65.5% recall@4 | comparison baseline |
-| TODO 2 — hybrid retrieval measurement                |  20/29 = 69.0% recall@4 | yes                 |
-| TODO 3 — answer verification against handbook claims | focused tests passed; full-flow impact not isolated | yes, with limitations |
-| TODO 6 — partial triage/branch wiring                | 80.73 / 100 full-flow checkpoint; memory and approval not implemented | in progress |
-| TODO 5 — fake-instruction defense                    | injection 85.00; 0 safety violations; 37 tests passed | yes                 |
-| TODO 1 — structured handbook splitting               | 14 sections → 46 chunks; dense recall 20/29 = 69.0% | yes                 |
+The available checkpoints are not a controlled score for every TODO in isolation. I report combined checkpoints where that is all that was recorded.
 
-The retrieval experiment shows a modest improvement from hybrid retrieval. The gain is 1 additional successful retrieval case out of 29, equivalent to 3.5 percentage points.
+| Change | Practice result after change | Kept? |
+|---|---:|---|
+| Starting baseline | 70.31 / 100 | Baseline |
+| TODO 4 tool loop | 71.67 / 100 | Yes |
+| TODO 2 retrieval configuration | 69.90 / 100; separate retrieval-only recall: dense 65.5%, hybrid 69.0% | Yes; dense remains default, hybrid measured separately |
+| TODO 1 structured chunking | 14 handbook sections; changed from 36 fixed chunks to 46 structured chunks at size 600 / overlap 150; no separate retrieval score | Yes; used in the recorded runs |
+| TODO 3 + TODO 4 + initial TODO 6 | 52.40 / 100; combined checkpoint, not an isolated verifier score | Yes |
+| TODO 6 complete flow | 77.29 / 100 | Yes |
+| TODO 5 injection defense | 77.08 / 100 full run; not an isolated effect | Yes |
+| Final dense run | 92.92 / 100 | Yes |
+| Final hybrid run with cache disabled | **94.58 / 100** | Yes; comparison only, one run per mode |
 
-### TODO5 — Prompt Injection Defense
+The largest recorded gain is the integrated result, from 70.31 at baseline to 94.58 in the latest run; the checkpoints do not isolate which single change caused it. The retrieval-only hybrid test gained 3.5 percentage points of recall over dense, but that did not guarantee a higher end-to-end score in every run. A query-translation experiment that removed order IDs and constrained the rewrite prompt scored 62.81, below the 69.90 restored-configuration checkpoint, so that version was discarded.
 
-Implemented prompt-injection detection and escalation handling for untrusted
-customer, ticket, tool, and handbook content.
+### Recorded development checkpoints
 
-- Added detection for prompt-injection attempts in customer queries and retrieved or ticket content.
-- Injection attempts are treated as untrusted content and are not followed as instructions.
-- Injection cases are escalated to a human using `escalate_to_human` with the appropriate reason and priority.
-- Verified that malicious ticket content does not bypass refund or approval policies.
-- Added dedicated tests for detection, `<untrusted>` boundaries, blocked refunds, and injection escalation.
-- The dedicated TODO 5 tests passed, and the full test suite passed with **37 tests**.
-- The implementation produced **0 safety violations** in the development evaluation.
+Older scores are retained as checkpoints because the implementation changed between runs and model output varies. The component order in the table is route / actions / facts / citations.
 
-**Evaluation result:**
+| Checkpoint | System score | Components / notes |
+| --- | ---: | --- |
+| Shipped baseline | 70.31 | Initial recorded result |
+| First tool-loop run | 71.67 | TODO 4 |
+| Early graph wiring | 31.98 | .333 / .604 / .000 / .167; zero safety violations |
+| TODO 3 + TODO 4 + initial TODO 6 | 52.40 | .333 / .604 / .458 / .764 |
+| After query translation | 58.96 | .500 / .604 / .542 / .785 |
+| Restored retrieval configuration | 69.90 | .500 / .917 / .542 / .785 |
+| Earlier TODO 5 full evaluation | 77.08 | Overall result, not isolated TODO 5 effect |
+| TODO 6 complete-flow checkpoint | 77.29 | .792 / .917 / .771 / .410; zero safety violations |
+| Route-fix checkpoint | 77.40 | .750 / .875 / .583 / .896 |
+| Narrowed tuning | 80.00 | .875 / .854 / .625 / .840 |
+| TODO 6 partial-wiring checkpoint | 80.73 | .875 / .875 / .625 / .840; zero safety violations |
+| Dense development run | 92.92 | 1.000 / .979 / 1.000 / .576; zero safety violations; cached responses used |
+| Hybrid development run, cache disabled | **94.58** | **1.000 / .979 / 1.000 / .688; zero safety violations; 0 cached calls** |
+| Separate report-preparation rerun | 89.38 | `dev-006` hit an OpenRouter SSL certificate error and had no order lookup; not a clean comparison |
 
-- Injection category score: **85.00**
-- Safety violations: **0**
+The dense run category scores were: `injection` 85.00; `refund_within_limit` 85.00; `safety_incident` 85.00; `return_eligibility` 88.75; `cancellation` 90.00; `escalate_other` 92.50; `refund_needs_approval` 93.75; `policy_qa` 95.00; `missing_info`, `multi_turn`, `order_status`, and `stale_policy` 100.00 each. In the latest no-cache hybrid run, cancellation scored 93.75 and refund within limit 100.00; injection and safety scored 85.00 each; all other categories scored 88.75 or higher, with missing info, multi-turn, order status, and stale policy at 100.00.
 
-The latest full development evaluation scored **77.08 / 100** across 24
-queries. This is an overall system score, not a TODO 5-only score.
+### Route confusion matrix
 
-The remaining score loss in the injection category is primarily related to
-response, fact, and citation matching rather than unsafe execution.
+The route confusion matrix below compares the expected routes in `data/dev_gold.jsonl` with the actual routes in the 24-record `dev_traces.jsonl` file for the dense 92.92 development run. Rows are expected routes; columns are actual routes. All 24 routes matched (14 resolved, 2 needs-info, and 8 escalated), consistent with the route score of 1.000.
 
-### TODO3 checkpoint
+| Expected \\ Actual | Resolved | Needs info | Escalated | Total |
+| --- | ---: | ---: | ---: | ---: |
+| Resolved | 14 | 0 | 0 | 14 |
+| Needs info | 0 | 2 | 0 | 2 |
+| Escalated | 0 | 0 | 8 | 8 |
+| **Total** | **14** | **2** | **8** | **24** |
 
-Command:
-
-```text
-python scripts/evaluate_dev.py --workers 4 --show 10
-```
-
-The latest run produced 24 traces and scored **80.73 / 100**. This is a full-flow
-checkpoint covering the currently retained retrieval, tool-calling, and verification
-implementation; it is not a TODO 3-only measurement.
-
-| Metric | Result |
-| ------ | ------: |
-| System score | **80.73 / 100** |
-| Route | 0.875 |
-| Actions | 0.875 |
-| Facts | 0.625 |
-| Citations | 0.840 |
-| Safety violations | 0 |
-
-This also shows that retrieval quality is only one part of the complete agent. Several categories remained unchanged between dense and hybrid retrieval, so routing, tool selection, verification, and escalation logic still need to be handled separately.
-
-### TODO 6 partial-wiring result
-
-After adding the initial triage node and conditional routing for `needs_info` and
-`escalated`, the same evaluation command produced 24 traces and the following
-result:
-
-```text
-system score      80.73 / 100   (n=24)
-  route     0.875   x0.25
-  actions   0.875   x0.35
-  facts     0.625   x0.25
-  citations 0.840   x0.15
-  safety violations: 0
-```
-
-Per-category results:
-
-| Category | Score |
-| --- | ---: |
-| `refund_needs_approval` | 33.75 |
-| `refund_within_limit` | 51.25 |
-| `return_eligibility` | 63.75 |
-| `missing_info` | 75.00 |
-| `policy_qa` | 75.00 |
-| `multi_turn` | 87.50 |
-| `safety_incident` | 87.50 |
-| `cancellation` | 97.50 |
-| `injection` | 97.50 |
-| `escalate_other` | 100.00 |
-| `order_status` | 100.00 |
-| `stale_policy` | 100.00 |
-
-The weakest cases were `dev-013` (missing `escalate_to_human`), `dev-011`
-(missing `issue_wallet_credit`), `dev-002` (incorrect escalation), `dev-016`
-(incorrect escalation instead of `needs_info`), and `dev-008` (missing
-`create_return`). This checkpoint demonstrates partial TODO 6 routing progress,
-but it does not demonstrate conversation memory, a human interrupt, or
-`SupportAgent.resume()` approval/rejection handling.
-
-### TODO 6(a) — Branches
-
-The graph was changed from a fixed linear flow to conditional routing using
-LangGraph `add_conditional_edges()`.
-
-A conditional branch was added after `triage` to distinguish requests that
-should continue to lookup/retrieval from requests that should go directly to
-the response path, such as `needs_info` and `escalated`.
-
-A second conditional branch was added after `act` so the graph can decide
-whether another action is required, the request should be escalated, or the
-action is complete and verification should run.
-
-The branch implementation was tested as part of the full development
-evaluation. The recorded checkpoint was:
-
-    system score      80.73 / 100
-    route              0.875
-    actions            0.875
-    facts              0.625
-    citations          0.840
-    safety violations  0
-
-This showed that the new conditional routing was working, although some
-individual cases still required further tuning.
-
-### TODO 6(b) — State
-
-The `SupportState` definition was reviewed and updated so that fields that
-accumulate across graph steps use `operator.add`, while fields representing
-the current value are overwritten by the latest node result.
-
-In particular, `messages` and `steps` retain information across multiple
-graph iterations. This is required for multi-step tool execution such as:
-
-    get_order
-    -> check_return_eligibility
-    -> create_return
-    -> verify
-
-The state behavior was validated through the multi-step action flow and
-multi-turn execution. The accumulated messages and steps were preserved
-across graph execution.
-
-No separate numeric evaluator score was recorded for state management alone;
-the state changes were validated as part of the complete graph tests.
-
-### TODO 6(c) — Memory and Human Checkpoint
-
-LangGraph checkpointing was added using `MemorySaver`, with a `thread_id`
-used to preserve the graph state for a conversation.
-
-The graph was also configured to support `interrupt_before=["act"]`, allowing
-execution to pause before a business action and wait for human approval.
-
-Three functional tests were performed:
-
-1. Normal execution
-
-   A normal return request completed successfully without an interrupt.
-
-2. Human approval
-
-   The graph was interrupted before `act`. After calling `resume()` with
-   approval, the graph continued and successfully executed the required
-   action sequence:
-
-       get_order
-       -> check_return_eligibility
-       -> create_return
-
-   The final route was `resolved`.
-
-3. Human rejection
-
-   The graph was interrupted before `act`. When `resume()` was called with
-   `approved=False`, the request ended as `escalated` and the pending
-   business action was not executed.
-
-All three checkpoint/approval tests passed.
-
-No separate numeric evaluator score was recorded for the memory and human
-checkpoint portion alone. The final full-flow score will be recorded after
-the remaining evaluation is complete.
-
-## TODO 6 — Complete Graph Evaluation
-
-After implementing branches, state handling, memory/checkpointing, and human approval/rejection, the complete development evaluation was run using:
-
-`python scripts\evaluate_dev.py`
-
-### Result
-
-- **System score:** 77.29 / 100
-- **Test cases:** 24
-- **Route:** 0.792
-- **Actions:** 0.917
-- **Facts:** 0.771
-- **Citations:** 0.410
-- **Safety violations:** 0
-
-### Category results
-
-- `multi_turn`: 47.50
-- `return_eligibility`: 51.25
-- `safety_incident`: 56.25
-- `policy_qa`: 60.00
-- `missing_info`: 75.00
-- `cancellation`: 85.00
-- `refund_within_limit`: 85.00
-- `stale_policy`: 85.00
-- `escalate_other`: 91.25
-- `refund_needs_approval`: 93.75
-- `injection`: 97.50
-- `order_status`: 100.00
-
-### Key observations
-
-- The agent successfully executed several multi-step tool flows, including `get_order` followed by dependent actions.
-- Refund escalation and safety escalation were successfully demonstrated in the evaluation traces.
-- Safety violations remained **0**.
-- Tool/action performance was relatively strong at **0.917**.
-- Remaining weaknesses were mainly in `multi_turn`, `return_eligibility`, `safety_incident`, and `policy_qa`.
-- The evaluation also showed some inconsistent behavior across concurrent test cases, particularly where an escalation action was expected but the final recorded action list contained only `get_order`.
-This evaluation represents the **complete TODO 6 result after implementing parts (a), (b), and (c)**.
-
-
-## TODO 4 observation: tool-calling loop
-
-The recorded result after implementing the tool-calling loop was 71.67 / 100 on the practice evaluation.
-
-The tool-calling loop allows the model to request available tools and receive their results before producing its response. However, the loop itself does not determine whether a case should be resolved, escalated, or rejected as unsupported. Those decisions require the verification and flow-control logic implemented in later TODOs.
+Earlier category breakdowns are retained here. The 31.98 run scored refund within limit 17.50; escalation, injection, refund approval, and safety 25.00 each; return eligibility 26.25; cancellation, multi-turn, policy QA, and stale policy 35.00 each; missing info and order status 50.00 each. The 80.73 run scored refund approval 33.75; refund within limit 51.25; return eligibility 63.75; missing info and policy QA 75.00 each; multi-turn and safety 87.50 each; cancellation and injection 97.50 each; escalation, order status, and stale policy 100.00 each. The 77.29 run scored multi-turn 47.50; return eligibility 51.25; safety 56.25; policy QA 60.00; missing info 75.00; cancellation, refund within limit, and stale policy 85.00; escalation 91.25; refund approval 93.75; injection 97.50; order status 100.00.
 
 ## 1. Searching the handbook
 
-The handbook is loaded by `support_agent.kb.load_sections()`, which reads Markdown files under `config.KB_DIR`, currently `data/kb/handbook.md`.
+`support_agent.kb.split_structured()` keeps chunks within handbook sections, preferring subsection headings, paragraph breaks, and sentence boundaries. The handbook has 14 sections. TODO 1 changed the initial 36 fixed chunks to 46 structured chunks at size 600 and overlap 150; section titles are included in chunk text. That chunk count is the direct TODO 1 result. The later dense and hybrid recall measurements evaluate retrieval, not chunking alone.
 
-### TODO 1 — Structured Knowledge-Base Chunking
+The retriever supports dense search and hybrid search. Hybrid combines dense embeddings with BM25 keyword results using Reciprocal Rank Fusion (RRF, `RRF_K=60`). With `TOP_K=4` and `CANDIDATE_K=8`, retrieval-only recall@4 was:
 
-Implemented `split_structured()` to split the handbook into chunks at meaningful
-text boundaries while keeping chunks within individual handbook sections. The
-splitter prefers subsection headings, paragraph boundaries, and sentence
-boundaries, and maintains the configured overlap without crossing section
-boundaries.
+| Mode | Recall@4 | Observation |
+| --- | ---: | --- |
+| Dense | 19/29 = 65.5% | Baseline |
+| Hybrid | 20/29 = 69.0% | One more relevant case, +3.5 percentage points |
 
-The knowledge-base index was rebuilt successfully with the structured strategy.
+Hybrid improved cancellation from 2/4 to 3/4 and escalation from 1/2 to 2/2, but stale-policy retrieval fell from 2/2 to 1/2. The gain was modest and not universal. Dense remains the default. Query translation improved a delayed-delivery example by retrieving the shipping section and coincided with a practice-score increase from 52.40 to 58.96; this was not an isolated controlled measurement of translation alone.
 
-| Build setting | Result |
-| --- | ---: |
-| Handbook sections | **14** |
-| Chunks generated | **46** |
-| Chunk size | **600** |
-| Chunk overlap | **150** |
-| Strategy | **structured** |
-| Index | successfully created under `.index` |
+A later full-agent comparison used hybrid retrieval with the LLM cache disabled for all 24 practice queries. It scored 94.58 versus 92.92 for the recorded dense run; citations rose from 0.576 to 0.688, while route, actions, and facts were 1.000, 0.979, and 1.000 in the hybrid run. The hybrid run's estimated API cost was $0.013412. This is one run per mode, so output variation prevents attributing the score difference to retrieval mode alone.
 
-The corresponding dense retrieval evaluation achieved **20/29 = 69.0%** recall@4.
+The `community` section is untrusted and `archive_returns_2024` is superseded. Retrieval post-processing removes both from trusted results and citations. I exclude them completely because neither is authoritative, and keeping them in the response context risks the model treating gossip or the old rule as current policy. The metadata also prevents either from being cited as a valid source.
 
-| Category | Recall@4 |
-| --- | ---: |
-| `cancellation` | 50% |
-| `refund_needs_approval` | 50% |
-| `safety_incident` | 50% |
-| `injection` | 50% |
-| `return_eligibility` | 67% |
-| `policy_qa` | 100% |
-| `stale_policy` | 100% |
-| `refund_within_limit` | 100% |
-| `escalate_other` | 100% |
-| `multi_turn` | 100% |
-
-Structured chunking and index construction completed successfully. The
-remaining retrieval gaps were addressed by the subsequent TODO 2 retrieval work.
-
-The retrieval configuration is:
-
-* `TOP_K=4`
-* `CANDIDATE_K=8`
-* `CHUNK_SIZE=600`
-* `CHUNK_OVERLAP=150`
-* `RRF_K=60`
-
-Two retrieval approaches were measured.
-
-### Dense retrieval
-
-Dense retrieval searches by semantic similarity. The measurement command was:
-
-```text
-$env:RETRIEVAL_MODE="dense"; python scripts/evaluate_dev.py --retrieval-only
-```
-
-Result:
-
-```text
-retrieval recall@4 (mode=dense): 19/29 = 0.655
-
-  refund_within_limit        0/2   0.00
-  cancellation               2/4   0.50
-  refund_needs_approval      2/4   0.50
-  safety_incident            2/4   0.50
-  escalate_other             1/2   0.50
-  return_eligibility         2/3   0.67
-  policy_qa                  2/2   1.00
-  stale_policy               2/2   1.00
-  injection                  4/4   1.00
-  multi_turn                 2/2   1.00
-```
-
-Overall recall@4 was **19/29 = 65.5%**.
-
-### Hybrid retrieval
-
-Hybrid retrieval combines dense retrieval with BM25 lexical retrieval and combines their rankings using Reciprocal Rank Fusion (RRF).
-
-The measurement command was:
-
-```text
-$env:RETRIEVAL_MODE="hybrid"; python scripts/evaluate_dev.py --retrieval-only
-```
-
-Result:
-
-```text
-retrieval recall@4 (mode=hybrid): 20/29 = 0.690
-
-  refund_within_limit        0/2   0.00
-  stale_policy               1/2   0.50
-  refund_needs_approval      2/4   0.50
-  safety_incident            2/4   0.50
-  return_eligibility         2/3   0.67
-  cancellation               3/4   0.75
-  policy_qa                  2/2   1.00
-  escalate_other             2/2   1.00
-  injection                  4/4   1.00
-  multi_turn                 2/2   1.00
-```
-
-Overall recall@4 was **20/29 = 69.0%**.
-
-### Dense vs hybrid
-
-| Retrieval mode |      Recall@4 | Result                 |
-| -------------- | ------------: | ---------------------- |
-| Dense          | 19/29 = 65.5% | baseline               |
-| Hybrid         | 20/29 = 69.0% | +1 case                |
-| Improvement    |             — | +3.5 percentage points |
-
-The hybrid approach therefore produced a measurable but modest improvement.
-
-The largest category improvements were:
-
-* `cancellation`: 2/4 → 3/4
-* `escalate_other`: 1/2 → 2/2
-
-Some categories did not improve:
-
-* `refund_within_limit`: 0/2 → 0/2
-* `refund_needs_approval`: 2/4 → 2/4
-* `safety_incident`: 2/4 → 2/4
-* `return_eligibility`: 2/3 → 2/3
-* `policy_qa`: 2/2 → 2/2
-* `injection`: 4/4 → 4/4
-* `multi_turn`: 2/2 → 2/2
-
-Interestingly, `stale_policy` decreased from 2/2 to 1/2 in the hybrid run. Therefore, the experiment does not support a claim that hybrid retrieval improves every category.
-
-The configured untrusted section is `community`, and the superseded section is `archive_returns_2024`. These sections must not be used as trusted answer sources.
-
-The retrieval post-processing removes hits whose document IDs appear in `UNTRUSTED_DOCS` or `SUPERSEDED_DOCS` before they are passed forward as trusted retrieval results.
+The measured retrieval-only comparison available in the run notes is dense versus hybrid: 65.5% versus 69.0% recall@4. Those measurements were made after retrieval implementation and belong to TODO 2, not TODO 1. I did not preserve a separate retrieval-only recall number that isolates structured chunking.
 
 ## 2. Checking the answer is true
 
-The current evaluation score for citations was 0.708, or 70.8%, across 24 queries in the recorded evaluation run.
+`node_verify()` splits an answer into atomic claims and asks the model whether each is supported by retrieved handbook chunks, order facts, and the return-eligibility tool result. Faithfulness is the supported-claim count divided by total claims. The acceptance threshold is 100% supported claims. Unsupported or out-of-scope answers are replaced with an escalation response, subject to explicit routes and successfully executed actions; no separate score for uncovered handbook questions was recorded.
 
-A separate measurement of the claim-checking cutoff, added latency, and token cost was not recorded in that run.
-
-The intended design is that retrieved handbook evidence is used to ground the response and that unsupported claims should not be presented as handbook-backed facts.
-
-### Claim-level verification
-
-Implemented `graph.node_verify` using the Lecture 6 faithfulness approach:
-
-1. Decompose the generated answer into atomic factual claims.
-2. Check each claim against the retrieved handbook context.
-3. Calculate the faithfulness score as:
-
-   `sum(supported_claims) / number_of_claims`
-
-4. If any claim is unsupported, the agent escalates rather than returning the unverified answer.
-
-Isolation tests:
-
-- Supported claim: `Returns are allowed within the return window.`
-  - Faithfulness score: `1.0`
-  - Supported: `True`
-  - Result: verification passed.
-
-- Unsupported claim: `Customers get a free laptop with every return.`
-  - Faithfulness score: `0.0`
-  - Supported: `False`
-  - Result: `escalated`.
-
-This demonstrates that the verifier distinguishes supported from unsupported claims. The verifier has not yet been evaluated as part of the complete graph flow.
+This check improves grounding but adds model calls, latency, and token use. No isolated before/after verifier measurement was recorded. In the latest 24-query hybrid run, all calls together used 90,280 tokens across both models, estimated at $0.013412; this is total run cost, not the verifier's incremental cost. Per-query trace latency averaged 7.76 seconds (median 7.44 seconds, p95 15.22 seconds); evaluation used four workers, so this is not total wall-clock duration. I would leave verification enabled because the run had a facts score of 1.000 and zero safety violations, while acknowledging that its separate contribution was not measured.
 
 ## 3. Tools and safety
 
-The evaluation reported zero safety violations in the recorded runs. However, the overall score remained limited by incorrect routes and missing required actions, particularly for refund and escalation cases.
+`node_act()` runs a bounded tool-calling loop (`MAX_TOOL_STEPS=6`). It supplies policy and order facts, executes requested tools, returns their results to the model, and repeats. Unknown tools and tool failures are returned as errors rather than crashing the run. Deterministic checks handle safety incidents, repeat-ticket history, refund approval limits, return eligibility, and delayed-delivery credits.
 
-The recorded weak categories included:
+In `dev-011`, the trace looked up order `MRD-700157` with `get_order`, then issued the permitted ₹500 wallet credit with `issue_wallet_credit` for a missed delivery date. Return flows similarly check eligibility after order lookup; `dev-008` still misses `create_return`, so that action path needs improvement.
 
-* `refund_within_limit`
-* `escalate_other`
-* `injection`
-* `refund_needs_approval`
-* `safety_incident`
+Safety incidents are escalated at P1 with stop-use and disconnect-from-power guidance. Refund limits and approval requirements are enforced in policy/tool guards, not only in model instructions. The latest practice result had zero safety violations.
 
-The recorded worst cases included:
-
-* `dev-008`: route escalated instead of resolved; missing `create_return`.
-* `dev-011`: route escalated instead of resolved; missing `issue_wallet_credit`.
-* `dev-012`: route escalated instead of resolved; missing `issue_wallet_credit`.
-* `dev-013`: missing `escalate_to_human`.
-* `dev-014`: missing `escalate_to_human`.
-* `dev-017`: missing `escalate_to_human`.
-* `dev-018`: missing `escalate_to_human`.
-* `dev-019`: missing `escalate_to_human`.
-
-These failures indicate that having the tools available is not sufficient: the agent must select the correct tool, supply the required arguments, and follow the handbook's escalation rules.
+Prompt-injection defenses use common-pattern detection (`policy.detect_injection`), untrusted-content wrappers (`wrap_untrusted`), and code-level action guards. Detection covers common instruction overrides, authority bypasses, and forced responses. Injection scored 35.00 in the recorded baseline and 85.00 in the latest run, but many changes occurred between runs, so this is not an isolated causal comparison. A reworded attack that avoids the known phrases could evade pattern detection; code-level refund approval limits still restrict what action can actually execute.
 
 ## 4. Controlling the flow
 
-The original graph followed a straight path through:
+The LangGraph has conditional routing after triage and action, a bounded action loop, response generation, and verification. When the action stage finishes, it routes to `respond`; the answer then passes through `verify`. The action router can also loop back to `act` when more tool calls are needed. `SupportState` accumulates messages and steps. `SupportAgent` uses `MemorySaver` by default, and conversation thread IDs support follow-up turns. The final `multi_turn` category score was 100.00.
 
-```text
-lookup → retrieve → respond → END
+### Human checkpoint functional example (separate from evaluator)
+
+The route branches after triage to lookup or respond, then loops through `act` while tools are needed before responding and verifying. `multi_turn` scored 47.50 in an earlier 77.29 checkpoint and 100.00 in the latest run; other changes also occurred between those runs, so this is not a memory-only effect. The human checkpoint is configurable with `interrupt_before=["act"]`; the standard evaluator does not enable it. In `scripts/test_todo6.py`, an `MRD-700112` return first paused before `act`; after approval, the sequence was `get_order` → `check_return_eligibility` → `create_return`, and the return was raised. A rejection-path check escalated without carrying out the action.
+
+The latest no-cache hybrid run had a 1.000 route score. Its route confusion counts map to the template’s human/solo table:
+
+| | Agent fetched a human | Agent handled it alone |
+|---|---:|---:|
+| Should have fetched a human | 8 correct | 0 missed |
+| Should have handled it alone | 0 unnecessary escalations | 16 correct |
+
+The earlier rejection-path check used `approved=False` and returned an escalated result without proceeding. These are functional checkpoint checks, not additional development-evaluator measurements; no separate numeric score was recorded for them.
+
+```mermaid
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	lookup(lookup)
+	triage(triage)
+	retrieve(retrieve)
+	act(act)
+	respond(respond)
+	verify(verify)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> triage;
+	act -.-> respond;
+	lookup --> retrieve;
+	respond --> verify;
+	retrieve --> act;
+	triage -.-> lookup;
+	triage -.-> respond;
+	verify --> __end__;
+	act -.-> act;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
 ```
-
-The graph therefore did not initially contain explicit branching for different outcomes such as:
-
-* `resolved`
-* `needs_info`
-* `escalated`
-
-The recorded evaluation showed missing human escalation in several cases, as well as missing refund and return actions.
-
-The intended later architecture is to introduce explicit flow control so that the agent can:
-
-1. retrieve relevant handbook evidence,
-2. verify the applicable policy,
-3. decide whether additional information is required,
-4. call the appropriate business tool,
-
-### Evaluator checkpoint — restored retrieval configuration
-
-After restoring the retrieval configuration used in the previous best measured run, a fresh 24-query development evaluation was run.
-
-| Metric | Result |
-| ------ | ------ |
-| System score | **69.90 / 100** |
-| Route | 0.500 |
-| Actions | 0.917 |
-| Facts | 0.542 |
-| Citations | 0.785 |
-| Safety violations | 0 |
-
-### Separate measured runs after the route fix
-
-Two later runs were recorded after the route-policy fix and the narrowed override logic.
-
-| Run | System score | Route | Actions | Facts | Citations | Safety violations |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Route fix checkpoint | **77.40 / 100** | 0.750 | 0.875 | 0.583 | 0.896 | 0 |
-| Final tuned run | **80.00 / 100** | 0.875 | 0.854 | 0.625 | 0.840 | 0 |
-
-The first of these two runs confirms the main improvement from the route fix alone: the overall system score moved from the earlier 69.90 baseline to 77.40, with route quality increasing materially while keeping the action score strong.
-
-The second run shows the follow-up tuning step: after narrowing the override logic to only the genuine stale-policy and missing-order edge cases, the system score increased again to 80.00, with the route metric rising to 0.875. This is recorded as a separate run so the result is not conflated with the earlier route-fix checkpoint.
-
-The strongest result is the action score (0.917), indicating that the action-stage context added to `node_act()` improved tool selection and execution.
-
-The main remaining weaknesses are routing and factual grounding. The lowest-scoring cases frequently end in `escalated` even when the requested operation appears to be within the agent's authority. The worst cases include return eligibility, missed-delivery compensation, cancellation, multi-turn requests, stale-policy handling, and order-status queries.
-
-This is an intermediate checkpoint, not the final submission score. Further changes will be evaluated against this 69.90 baseline.
-
-5. escalate when human approval is required,
-6. produce the final response with the required ending.
-
-Separate before/after measurements for the memory and human-checkpoint portions were not recorded at this stage.
 
 ## Evidence
 
-### Retrieval-only experiment 1 — Dense
+The latest no-cache hybrid result wrote 24 traces to `dev_traces_hybrid_nocache.jsonl`; it had no SSL failures or cached calls. Its lowest-scoring query was `dev-008` (0.78), which missed `create_return`. The 92.92 dense run and earlier 90.94 hybrid run are retained as separate comparison checkpoints; an SSL-failed hybrid attempt was excluded from score comparisons.
 
-```text
-$env:RETRIEVAL_MODE="dense"; python scripts/evaluate_dev.py --retrieval-only
+![Web app trace panel](screenshot.png)
 
-retrieval recall@4 (mode=dense): 19/29 = 0.655
-```
-
-### Retrieval-only experiment 2 — Hybrid
-
-```text
-$env:RETRIEVAL_MODE="hybrid"; python scripts/evaluate_dev.py --retrieval-only
-
-retrieval recall@4 (mode=hybrid): 20/29 = 0.690
-```
-
-### Full evaluation command
-
-```text
-python scripts/evaluate_dev.py
-```
-
-One recorded result was:
-
-```text
-wrote 24 traces -> dev_traces.jsonl
-
-system score      31.98 / 100   (n=24)
-
-  route     0.333   x0.25
-  actions   0.604   x0.35
-  facts     0.000   x0.25
-  citations 0.167   x0.15
-  safety violations: 0
-```
-
-### Score per category from that recorded run
-
-| Category                | Score |
-| ----------------------- | ----: |
-| `refund_within_limit`   | 17.50 |
-| `escalate_other`        | 25.00 |
-| `injection`             | 25.00 |
-| `refund_needs_approval` | 25.00 |
-| `safety_incident`       | 25.00 |
-| `return_eligibility`    | 26.25 |
-| `cancellation`          | 35.00 |
-| `multi_turn`            | 35.00 |
-| `policy_qa`             | 35.00 |
-| `stale_policy`          | 35.00 |
-| `missing_info`          | 50.00 |
-| `order_status`          | 50.00 |
-
-### Worst eight queries from that recorded run
-
-| Query     | Category                | Score | Main problem                                                       |
-| --------- | ----------------------- | ----: | ------------------------------------------------------------------ |
-| `dev-008` | `return_eligibility`    |  0.17 | route escalated instead of resolved; missing `create_return`       |
-| `dev-011` | `refund_within_limit`   |  0.17 | route escalated instead of resolved; missing `issue_wallet_credit` |
-| `dev-012` | `refund_within_limit`   |  0.17 | route escalated instead of resolved; missing `issue_wallet_credit` |
-| `dev-013` | `refund_needs_approval` |  0.25 | missing `escalate_to_human`                                        |
-| `dev-014` | `refund_needs_approval` |  0.25 | missing `escalate_to_human`                                        |
-| `dev-017` | `safety_incident`       |  0.25 | missing `escalate_to_human`                                        |
-| `dev-018` | `safety_incident`       |  0.25 | missing `escalate_to_human`                                        |
-| `dev-019` | `escalate_other`        |  0.25 | missing `escalate_to_human`                                        |
-
-### Intermediate evaluator run after TODO 3 + TODO 4 + initial TODO 6 wiring
-
-A fresh 24-query evaluator run was performed after wiring the graph as:
-
-```rust
-lookup -> retrieve -> act -> respond -> verify -> END
-```
-
-Results:
-
-- System score: **52.40 / 100**
-- Route: **0.333**
-- Actions: **0.604**
-- Facts: **0.458**
-- Citations: **0.764**
-- Safety violations: **0**
-
-The run produced 24 traces. Several lower-scoring cases were escalated when
-the evaluator expected `resolved`, including refund-within-limit,
-return-eligibility, cancellation, policy-QA, and stale-policy cases.
-
-This is an intermediate measurement, not a final result. The result indicates
-that the current verification/flow wiring needs further refinement before the
-final evaluator run.
-
-### Retrieval experiment — query translation
-
-The initial dense retrieval used the customer's wording directly. For a delayed-delivery
-query, it retrieved return/damage/error sections rather than the shipping policy.
-
-A query-translation step was then added using the configured FAST_MODEL to rewrite the
-customer request into policy-oriented search terms before retrieval.
-
-For the delayed-delivery test, the translated query caused the `shipping` handbook
-section to appear in the retrieved results, whereas the original query did not retrieve
-`shipping`.
-
-A fresh 24-query development evaluation was then run.
-
-| Version | System score | Route | Actions | Facts | Citations |
-|---|---:|---:|---:|---:|---:|
-| Before query translation | 52.40 | 0.333 | 0.604 | 0.458 | 0.764 |
-| After query translation | 58.96 | 0.500 | 0.604 | 0.542 | 0.785 |
-
-Safety violations remained 0.
-
-The measured result is an improvement of 6.56 points in the system score. Route and
-fact scores also improved, while action accuracy remained unchanged. This suggests
-that query translation improved retrieval/grounding but did not by itself solve the
-agent's tool-selection behavior.
-
-### Tool-calling action test
-
-For the delayed-delivery case `dev-011`, the tool-calling loop was tested after
-providing the action model with retrieved handbook context and order facts.
-
-The model requested:
-
-    issue_wallet_credit(
-        customer_id="C-1001",
-        amount_inr=500,
-        reason="Goodwill gesture for missed delivery date."
-    )
-
-The tool executed successfully and returned:
-
-    500.0 INR credited to C-1001's wallet.
-
-The following model turn returned no further tool calls, so the loop stopped
-normally. The final route was `resolved`.
-
-This confirms that the tool-calling loop can perform the required goodwill-credit
-action when the relevant policy context and order facts are available.
-
-Add one screenshot of the web app's trace panel here before submitting.
+The latest hybrid category scores were: `injection` and `safety_incident` 85.00; `return_eligibility` 88.75; `escalate_other` 92.50; `cancellation` 93.75; `policy_qa` and `refund_needs_approval` 95.00; `refund_within_limit`, `missing_info`, `multi_turn`, `order_status`, and `stale_policy` 100.00. The lowest categories were injection and safety at 85.00; with another week, I would add targeted adversarial and safety regression cases, then measure them on a held-out set.
 
 ## How to run this
 
+The full test suite passed **37 tests** during development. Commands used:
+
 ```powershell
-.\venv\Scripts\python.exe -m pip install -r requirements.txt
-
-.\venv\Scripts\python.exe scripts/build_index.py --force
-
-.\venv\Scripts\python.exe scripts/evaluate_dev.py
-
-.\venv\Scripts\python.exe -m support_agent.app
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }  # add key; never submit .env
+.\.venv\Scripts\python.exe -X utf8 scripts\build_index.py --force
+.\.venv\Scripts\python.exe -X utf8 scripts\evaluate_dev.py --workers 4 --show 10
+$env:RETRIEVAL_MODE = "hybrid"
+$env:LLM_CACHE = "false"
+.\.venv\Scripts\python.exe -X utf8 scripts\evaluate_dev.py --workers 4 --show 8 --out dev_traces_hybrid_nocache.jsonl
+.\.venv\Scripts\python.exe -X utf8 -m pytest tests -q
+.\.venv\Scripts\python.exe -X utf8 -m support_agent.app
+.\.venv\Scripts\python.exe -X utf8 scripts\run_batch.py --in data\test_queries.jsonl --out submission.jsonl
 ```
 
-The project was inspected and run with GitHub Copilot. It was used to diagnose the Python interpreter mismatch, locate the handbook loading path, implement and test retrieval changes, and organize the measured evaluation results in this report.
+For the hybrid evaluation, set `$env:RETRIEVAL_MODE = "hybrid"` and `$env:LLM_CACHE = "false"` before the evaluation command. Set valid `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` paths if the network requires a custom CA certificate. The run used OpenRouter models configured in `support_agent/config.py` and estimated cost from the listed per-model rates; check current rates before reproducing the estimate. The report screenshot is `screenshot.png`, which shows the web app trace panel.
+
+OpenAI Codex assisted with code inspection, discussing evaluation failures, targeted edits, and report editing. Disclose any additional AI assistance and follow the course's individual-work rules.

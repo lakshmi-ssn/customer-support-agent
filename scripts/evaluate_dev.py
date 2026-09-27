@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from evalkit import metrics  # noqa: E402
-from support_agent import trace  # noqa: E402
+from support_agent import config, trace  # noqa: E402
 from support_agent.agent import SupportAgent  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -88,6 +88,31 @@ def main():
 
     report = metrics.score_all(preds, golds)
     print(metrics.format_report(report, show_rows=a.show))
+    # Token usage is collected per trace and grouped by the actual model called.
+    totals = {}
+    for prediction in preds:
+        meta = prediction.get("meta", {})
+        for model, usage in meta.get("usage_by_model", {}).items():
+            row = totals.setdefault(model, {
+                "calls": 0, "cached_calls": 0, "prompt_tokens": 0,
+                "completion_tokens": 0, "estimated_cost_usd": 0.0,
+            })
+            for key in ("calls", "cached_calls", "prompt_tokens", "completion_tokens"):
+                row[key] += usage.get(key, 0)
+            rates = config.OPENROUTER_RATES.get(model)
+            if rates:
+                row["estimated_cost_usd"] += (
+                    usage.get("prompt_tokens", 0) * rates["input"]
+                    + usage.get("completion_tokens", 0) * rates["output"]
+                ) / 1_000_000
+    if totals:
+        print("\nRecorded API usage (cached calls excluded from estimated cost):")
+        for model, usage in sorted(totals.items()):
+            print(f"  {model}: {usage['calls']} calls, {usage['cached_calls']} cached, "
+                  f"{usage['prompt_tokens']} input + {usage['completion_tokens']} output tokens, "
+                  f"estimated ${usage['estimated_cost_usd']:.6f}")
+        print("  Estimates use configured OpenRouter listed rates; update "
+              "support_agent/config.py if rates change.")
     if a.json:
         Path(a.json).write_text(json.dumps(report, indent=2))
         print(f"\nfull report -> {a.json}")

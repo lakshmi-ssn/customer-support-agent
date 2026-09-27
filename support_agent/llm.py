@@ -17,6 +17,8 @@ import hashlib
 import json
 import os
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import requests
 from dotenv import load_dotenv
@@ -33,6 +35,78 @@ HEADERS_EXTRA = {
 }
 
 USAGE = {"calls": 0, "cached": 0, "prompt_tokens": 0, "completion_tokens": 0}
+_RUN_USAGE = ContextVar("meridian_run_usage", default=None)
+
+
+def _usage_model(model):
+    bucket = _RUN_USAGE.get()
+    if bucket is None:
+        return None
+    return bucket.setdefault("models", {}).setdefault(model, {
+        "calls": 0, "cached_calls": 0, "prompt_tokens": 0,
+        "completion_tokens": 0,
+    })
+
+
+@contextmanager
+def track_run_usage():
+    """Collect per-model usage in the current task/thread (safe for parallel eval)."""
+    bucket = {"models": {}}
+    token = _RUN_USAGE.set(bucket)
+    try:
+        yield bucket
+    finally:
+        _RUN_USAGE.reset(token)
+
+
+def _record_usage(model, prompt_tokens=0, completion_tokens=0, cached=False):
+    item = _usage_model(model)
+    if item is None:
+        return
+    if cached:
+        item["cached_calls"] += 1
+    else:
+        item["calls"] += 1
+        item["prompt_tokens"] += int(prompt_tokens or 0)
+        item["completion_tokens"] += int(completion_tokens or 0)
+
+
+def _token_counts(response):
+    """Extract token usage from LangChain's common response shapes."""
+    usage = response.get("token_usage", {}) if isinstance(response, dict) else {}
+    if not usage and isinstance(response, dict):
+        usage = response.get("usage", {})
+    if isinstance(usage, dict) and isinstance(usage.get("token_usage"), dict):
+        usage = usage["token_usage"]
+    if not usage:
+        for generation in getattr(response, "generations", []) or []:
+            for item in generation:
+                message = getattr(item, "message", None)
+                usage = getattr(message, "usage_metadata", None) or {}
+                if usage:
+                    break
+            if usage:
+                break
+    return (usage.get("prompt_tokens", usage.get("input_tokens", 0)),
+            usage.get("completion_tokens", usage.get("output_tokens", 0)))
+
+
+try:
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    class _UsageCallback(BaseCallbackHandler):
+        def __init__(self, model):
+            self.model = model
+
+        def on_llm_end(self, response, **kwargs):
+            prompt, completion = _token_counts(
+                getattr(response, "llm_output", None) or response
+            )
+            if not prompt and not completion:
+                prompt, completion = _token_counts(response)
+            _record_usage(self.model, prompt, completion)
+except ImportError:  # pragma: no cover - dependency is required by this project
+    _UsageCallback = None
 
 
 class LLMError(RuntimeError):
@@ -101,6 +175,7 @@ def chat(prompt_or_messages, model=None, temperature=None, max_tokens=None,
     path = _cache_path(request) if use_cache else None
     if path is not None and path.exists():
         USAGE["cached"] += 1
+        _record_usage(request["model"], cached=True)
         return json.loads(path.read_text())["text"]
 
     last = None
@@ -132,6 +207,8 @@ def chat(prompt_or_messages, model=None, temperature=None, max_tokens=None,
             USAGE["calls"] += 1
             USAGE["prompt_tokens"] += usage.get("prompt_tokens", 0)
             USAGE["completion_tokens"] += usage.get("completion_tokens", 0)
+            _record_usage(request["model"], usage.get("prompt_tokens", 0),
+                          usage.get("completion_tokens", 0))
             if path is not None:
                 path.write_text(json.dumps({"text": text, "model": request["model"]}))
             return text
@@ -195,11 +272,16 @@ def chat_model(model=None, temperature=None, **kw):
     different client library.
     """
     from langchain_openai import ChatOpenAI
+    selected_model = model or config.TOOL_MODEL
+    callbacks = list(kw.pop("callbacks", []) or [])
+    if _UsageCallback is not None:
+        callbacks.append(_UsageCallback(selected_model))
     return ChatOpenAI(
-        model=model or config.TOOL_MODEL,
+        model=selected_model,
         temperature=config.TEMPERATURE if temperature is None else temperature,
         base_url=BASE_URL,
         api_key=api_key(),
         default_headers=HEADERS_EXTRA,
         timeout=config.REQUEST_TIMEOUT,
+        callbacks=callbacks,
         **kw)

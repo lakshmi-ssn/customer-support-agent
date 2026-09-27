@@ -84,6 +84,13 @@ python scripts/evaluate_dev.py           # gives you a mark out of 100. Expect a
 python -m support_agent.app              # opens the web app at localhost:7860
 ```
 
+Each generated trace records input and output token counts by model under
+`meta.usage_by_model`. `meta.estimated_cost_usd` and the evaluation summary use
+the listed OpenRouter rates in `support_agent/config.py`; cached calls are counted
+but excluded from estimated cost. Rates can change, so check OpenRouter and update
+the configuration before treating estimates as current billing figures. Historical
+traces with only `meta.tokens` do not contain enough detail to split input from output.
+
 Write that first mark down. Every improvement you claim later is measured against it.
 
 If anything breaks at any point, run `python scripts/check_env.py` first.

@@ -35,6 +35,11 @@ TOOL_MODEL = _env("TOOL_MODEL", "openai/gpt-4o-mini")
 FAST_MODEL = _env("FAST_MODEL", "meta-llama/llama-3.1-8b-instruct")
 TEMPERATURE = _env("TEMPERATURE", 0.0, float)
 MAX_TOKENS = _env("MAX_TOKENS", 900, int)
+# Listed OpenRouter rates in USD per million tokens (update when provider rates change).
+OPENROUTER_RATES = {
+    "openai/gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "meta-llama/llama-3.1-8b-instruct": {"input": 0.02, "output": 0.04},
+}
 
 # --------------------------------------------------------------------------- #
 # retrieval

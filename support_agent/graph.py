@@ -151,7 +151,6 @@ class SupportGraph:
             {
                 "act": "act",
                 "respond": "respond",
-                "verify": "verify",
             },
         )
         graph.add_edge("respond", "verify")
@@ -622,7 +621,14 @@ ORDER FACTS:
                     # Eligibility questions need an answer, not an unrequested
                     # return transaction. Use the tool's result for both facts
                     # and route so a weak model response cannot override it.
-                    if re.search(r"\b(inside|eligible|eligibility|return window|send(?: it)? back|deadline)\b", lower_query):
+                    eligibility_question = re.search(
+                        r"\b(inside|eligible|eligibility|return window|"
+                        r"deadline)\b|"
+                        r"\b(?:can|could|may)\s+(?:i|we)\s+"
+                        r"(?:still\s+)?(?:return|send(?: it)? back)\b",
+                        lower_query,
+                    )
+                    if eligibility_question:
                         eligibility = json.loads(eligibility_result)
                         eligibility_items = eligibility.get("items", [])
                         item = next(
@@ -657,6 +663,69 @@ ORDER FACTS:
                             "messages": messages,
                             "route": "resolved",
                             "answer": answer,
+                            "act_done": True,
+                        }
+
+                    # An explicit request to initiate a return is a business
+                    # action, not just an eligibility question. After the
+                    # authoritative check, create returns for eligible items
+                    # directly instead of relying on another model decision.
+                    return_action_intent = re.search(
+                        r"\b(?:i want|i(?:'d| would) like|please|can you|"
+                        r"could you)\s+(?:to\s+)?(?:return|send(?: it)? back)\b|"
+                        r"\b(?:start|initiate|create)\s+(?:a\s+)?return\b",
+                        lower_query,
+                    )
+                    if return_action_intent:
+                        eligibility = json.loads(eligibility_result)
+                        eligible_items = [
+                            entry for entry in eligibility.get("items", [])
+                            if entry.get("eligible")
+                        ]
+                        if not eligible_items:
+                            first_item = (eligibility.get("items") or [{}])[0]
+                            reason = first_item.get("reason", "the return window has closed")
+                            return {
+                                "steps": ["act"],
+                                "messages": messages,
+                                "route": "resolved",
+                                "answer": (
+                                    f"Order {order_id} is not eligible for a return: {reason}."
+                                ),
+                                "act_done": True,
+                            }
+
+                        return_results = []
+                        for item in eligible_items:
+                            result = self.tools["create_return"].invoke({
+                                "order_id": order_id,
+                                "sku": item.get("sku", ""),
+                                "reason": "Customer requested a return",
+                            })
+                            result = str(result)
+                            return_results.append(result)
+                            messages.append(
+                                ToolMessage(
+                                    content=result,
+                                    tool_call_id=f"create_return_{item.get('sku', 'item')}",
+                                )
+                            )
+
+                        created = all(
+                            result.startswith("Return raised for ")
+                            for result in return_results
+                        )
+                        return {
+                            "steps": ["act"],
+                            "messages": messages,
+                            "route": "resolved" if created else "escalated",
+                            "answer": (
+                                "The return has been created. "
+                                + " ".join(return_results)
+                                if created else
+                                "I could not create the return automatically. "
+                                + " ".join(return_results)
+                            ),
                             "act_done": True,
                         }
 
@@ -1500,5 +1569,7 @@ def draw(customer_id=None):
     g = SupportGraph(customer_id).graph.get_graph()
     try:
         print(g.draw_ascii())                     # needs grandalf (in requirements.txt)
-    except ImportError:
+    except (ImportError, ValueError):
+        # grandalf's ASCII router can fail on some conditional/loop graph layouts.
+        # Mermaid is a reliable fallback and still shows the compiled graph.
         print(g.draw_mermaid())                   # always available

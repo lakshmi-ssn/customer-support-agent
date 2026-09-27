@@ -19,31 +19,42 @@ class SupportAgent:
     def resolve(self, query_record, thread_id=None):
         """Run one customer query end to end. Returns a trace dict."""
         started = time.time()
-        before = llm.usage_snapshot()
-
         graph = SupportGraph(customer_id=query_record.get("customer_id"),
                              checkpointer=self.checkpointer,
                              interrupt_before=self.interrupt_before,
                              retriever=self.retriever)
-        try:
-            final = graph.run(query_id=query_record["query_id"],
-                              query=query_record["query"],
-                              customer_id=query_record.get("customer_id"),
-                              history=query_record.get("history") or [],
-                              thread_id=thread_id)
-        except Exception as e:                        # noqa: BLE001 — never lose a row
-            # Print the whole thing to the console: the one-line version in the
-            # trace tells you what broke but never where, which makes debugging
-            # far harder than it needs to be.
-            traceback.print_exc()
-            tb = traceback.extract_tb(e.__traceback__)
-            where = f" at {tb[-1].filename.split('/')[-1]}:{tb[-1].lineno}" if tb else ""
-            final = {"answer": f"(agent error: {type(e).__name__}: {e}{where})",
-                     "route": "escalated", "citations": [],
-                     "actions": list(graph.ctx.actions), "escalation": None,
-                     "steps": ["error"], "hits": []}
+        with llm.track_run_usage() as run_usage:
+            try:
+                final = graph.run(query_id=query_record["query_id"],
+                                  query=query_record["query"],
+                                  customer_id=query_record.get("customer_id"),
+                                  history=query_record.get("history") or [],
+                                  thread_id=thread_id)
+            except Exception as e:                    # noqa: BLE001 — never lose a row
+                traceback.print_exc()
+                tb = traceback.extract_tb(e.__traceback__)
+                where = f" at {tb[-1].filename.split('/')[-1]}:{tb[-1].lineno}" if tb else ""
+                final = {"answer": f"(agent error: {type(e).__name__}: {e}{where})",
+                         "route": "escalated", "citations": [],
+                         "actions": list(graph.ctx.actions), "escalation": None,
+                         "steps": ["error"], "hits": []}
 
-        after = llm.usage_snapshot()
+        usage_by_model = run_usage["models"]
+        llm_calls = sum(item["calls"] for item in usage_by_model.values())
+        cached_calls = sum(item["cached_calls"] for item in usage_by_model.values())
+        prompt_tokens = sum(item["prompt_tokens"] for item in usage_by_model.values())
+        completion_tokens = sum(item["completion_tokens"] for item in usage_by_model.values())
+        estimated_cost = 0.0
+        complete_pricing = True
+        for model_name, item in usage_by_model.items():
+            rates = config.OPENROUTER_RATES.get(model_name)
+            if rates is None:
+                complete_pricing = False
+                continue
+            estimated_cost += (
+                item["prompt_tokens"] * rates["input"]
+                + item["completion_tokens"] * rates["output"]
+            ) / 1_000_000
         injection_detection = []
         for h in final.get("hits", []):
             result = policy.detect_injection(h.get("text", ""))
@@ -55,11 +66,15 @@ class SupportAgent:
 
         meta = {
             "latency_s": round(time.time() - started, 2),
-            "llm_calls": after["calls"] - before["calls"],
-            "cached_calls": after["cached"] - before["cached"],
-            "tokens": (after["prompt_tokens"] - before["prompt_tokens"]
-                       + after["completion_tokens"] - before["completion_tokens"]),
+            "llm_calls": llm_calls,
+            "cached_calls": cached_calls,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "tokens": prompt_tokens + completion_tokens,
             "model": config.TOOL_MODEL,
+            "usage_by_model": usage_by_model,
+            "estimated_cost_usd": round(estimated_cost, 8) if complete_pricing else None,
+            "pricing_basis": "configured OpenRouter listed rates; excludes cached calls",
             "retrieval_mode": config.RETRIEVAL_MODE,
             "graph_path": final.get("steps", []),
             "retrieved": [h.get("doc_id", "") for h in final.get("hits", [])],
@@ -129,4 +144,9 @@ class SupportAgent:
                 },
             )
 
-        return graph.graph.invoke(None, cfg)
+        result = graph.graph.invoke(None, cfg)
+        # The resumed graph uses this SupportGraph's ToolContext. Attach its
+        # action log so callers can verify which actions the approval enabled.
+        result["actions"] = list(graph.ctx.actions)
+        result["escalation"] = graph._escalation_packet(result)
+        return result

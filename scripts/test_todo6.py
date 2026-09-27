@@ -27,7 +27,7 @@ print("\n--- RESUMING WITH APPROVAL ---")
 
 result2 = agent.resume(
     thread_id=thread_id,
-    approved=False,
+    approved=True,
     note="Approved by support supervisor."
 )
 
